@@ -1,5 +1,12 @@
 {
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "voice-readout",
-  "description": "Automatically reads out agent responses using system Text-to-Speech (TTS)."
+  "displayName": "Voice Readout",
+  "version": "1.0.0",
+  "description": "Reads out or explains Antigravity CLI responses as natural spoken audio using high-definition neural voices.",
+  "suggestedPrompts": [
+    "/readout mode explain",
+    "/readout mode direct",
+    "/readout status"
+  ]
 }
