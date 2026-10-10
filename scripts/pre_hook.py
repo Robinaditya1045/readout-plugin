@@ -12,6 +12,8 @@ import json
 import os
 import re
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 
 # Add scripts directory to path
@@ -19,6 +21,17 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 import toggle
+
+LOG_FILE = Path.home() / ".gemini" / "antigravity-cli" / "voice_readout_hook.log"
+
+
+def log_event(message: str):
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now().isoformat()}] {message}\n")
+    except Exception:
+        pass
 
 
 def parse_readout_command(prompt: str):
@@ -82,6 +95,7 @@ def execute_toggle_action(args):
 
 
 def main():
+    start_time = time.time()
     hook_output = {"injectSteps": []}
 
     try:
@@ -110,12 +124,14 @@ def main():
                 except Exception:
                     continue
 
-            # Strip XML tags like <USER_REQUEST> if present
             clean_prompt = re.sub(r"<[^>]+>", "", latest_user_prompt).strip()
             args = parse_readout_command(clean_prompt)
 
             if args is not None:
                 result_msg = execute_toggle_action(args)
+                elapsed_ms = (time.time() - start_time) * 1000
+                log_event(f"Intercepted '{clean_prompt}' -> Executed {args} in {elapsed_ms:.2f}ms -> Result: '{result_msg}'")
+
                 if result_msg:
                     hook_output["injectSteps"].append({
                         "ephemeralMessage": (
@@ -125,8 +141,8 @@ def main():
                         )
                     })
 
-    except Exception:
-        pass
+    except Exception as e:
+        log_event(f"Error in pre_hook: {e}")
     finally:
         sys.stdout.write(json.dumps(hook_output) + "\n")
         sys.stdout.flush()
