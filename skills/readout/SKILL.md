@@ -1,25 +1,25 @@
 ---
 name: readout
-description: Instantly toggle or configure voice readout text-to-speech without deliberation.
+description: Control voice readout (spoken agent responses) - turn it on or off, stop or replay the current speech, switch between explain and direct modes, change the voice, or show status.
 ---
 
 # Voice Readout (`/readout`)
 
 > [!IMPORTANT]
 > **ZERO DELIBERATION RULE**:
-> If the hook already executed the action (see system notice), DO NOT call any tools. Output the confirmation directly.
-> Otherwise, immediately call `run_command` in Step 1 without multi-step planning or deliberation.
+> If a system notice says the command was already executed, DO NOT call any tools. Output that confirmation directly.
+> Otherwise run the matching command below in ONE step, without planning, and return its output to the user.
 
 ## Direct Command Map
 
-- `/readout on` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py on`
-- `/readout off` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py off`
-- `/readout stop` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py stop`
-- `/readout replay` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py replay`
-- `/readout mode explain` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py mode explain`
-- `/readout mode direct` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py mode direct`
-- `/readout voice <name>` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py voice <name>`
-- `/readout status` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py status`
-- `/readout test` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py test`
+| `/readout ...` | Run |
+|---|---|
+| `on` / `off` | `readout on` / `readout off` |
+| `stop` | `readout stop` (stop the current speech, keep readout on) |
+| `replay` | `readout replay` (read the last response again) |
+| `mode explain` / `mode direct` | `readout mode explain` / `readout mode direct` |
+| `voice <name>` | `readout voice <name>` (siri, ava, emma, andrew, brian, aria, jenny, guy, google) |
+| `status` | `readout status` |
+| `test` | `readout test` |
 
-Return the single-line command result directly to the user.
+If `readout` is not on the PATH, run `python3 ~/.local/share/voice-readout/scripts/toggle.py` with the same arguments.

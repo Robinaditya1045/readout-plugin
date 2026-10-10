@@ -1,0 +1,16 @@
+{
+  "name": "voice-readout",
+  "owner": {
+    "name": "Robinaditya1045",
+    "url": "https://github.com/Robinaditya1045"
+  },
+  "description": "Voice Readout: hear your coding agent's responses as natural speech.",
+  "plugins": [
+    {
+      "name": "voice-readout",
+      "source": "./",
+      "description": "Reads out or explains agent responses as natural speech with neural voices, including every command to run.",
+      "category": "accessibility"
+    }
+  ]
+}

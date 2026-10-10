@@ -12,15 +12,14 @@ Usage:
   python3 scripts/toggle.py test
 """
 
-import json
 import sys
 from pathlib import Path
 
 # Add scripts directory to path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from player import LAST_TEXT_FILE, VOICE_ALIASES, stop_playback
-
-CONFIG_PATH = Path.home() / ".gemini" / "antigravity-cli" / "voice_readout_config.json"
+import state
+from player import VOICE_ALIASES, stop_playback
+from state import load_config, save_config
 
 OFF_ACTIONS = ("off", "disable", "mute")
 STOP_ACTIONS = ("stop", "skip", "hush", "shh")
@@ -38,31 +37,6 @@ Would you like to test another voice?
 """
 
 
-def load_config() -> dict:
-    default_config = {
-        "enabled": True,
-        "mode": "explain",  # "explain" (conversational brief) or "direct" (verbatim)
-        "voice": "en-US-AvaNeural",
-        "speech_rate": "+0%",
-        "max_chars": 2000,
-        "include_code_notice": True,
-    }
-    if CONFIG_PATH.exists():
-        try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                saved = json.load(f)
-                default_config.update(saved)
-        except Exception:
-            pass
-    return default_config
-
-
-def save_config(config: dict) -> None:
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2)
-
-
 def stop_speech() -> str:
     if stop_playback():
         return "⏹️ Stopped the current readout."
@@ -71,7 +45,7 @@ def stop_speech() -> str:
 
 def replay_last(config: dict) -> str:
     try:
-        text = LAST_TEXT_FILE.read_text(encoding="utf-8").strip()
+        text = state.LAST_TEXT_FILE.read_text(encoding="utf-8").strip()
     except OSError:
         text = ""
     if not text:
@@ -166,15 +140,15 @@ def main():
             print_available_voices()
 
     elif action == "status":
-        state = "ENABLED" if config.get("enabled", True) else "DISABLED"
+        status = "ENABLED" if config.get("enabled", True) else "DISABLED"
         symbol = "🔊" if config.get("enabled", True) else "🔇"
         mode = config.get("mode", "explain").upper()
         voice = config.get("voice", "en-US-AvaNeural")
-        print(f"{symbol} Voice readout status: {state}")
+        print(f"{symbol} Voice readout status: {status}")
         print(f"   Mode: {mode}")
         print(f"   Voice: {voice}")
         print(f"   Speech rate: {config.get('speech_rate', '+0%')}")
-        print(f"   Config file: {CONFIG_PATH}")
+        print(f"   Config file: {state.CONFIG_PATH}")
 
     elif action == "test":
         print(speak_test(config))

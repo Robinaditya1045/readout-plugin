@@ -1,0 +1,15 @@
+{
+  "name": "voice-readout",
+  "displayName": "Voice Readout",
+  "version": "2.0.0",
+  "description": "Reads out or explains agent responses as natural speech with neural voices, including every command to run.",
+  "author": {
+    "name": "Robinaditya1045",
+    "url": "https://github.com/Robinaditya1045"
+  },
+  "homepage": "https://github.com/Robinaditya1045/readout-plugin",
+  "repository": "https://github.com/Robinaditya1045/readout-plugin",
+  "license": "MIT",
+  "keywords": ["voice", "tts", "text-to-speech", "accessibility", "readout", "edge-tts"],
+  "commands": []
+}

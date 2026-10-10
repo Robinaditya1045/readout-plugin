@@ -4,11 +4,14 @@ Player tests: audio is streamed into a stand-in player command that writes to a 
 so nothing is ever played out loud.
 """
 
+import os
 import shlex
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+os.environ.setdefault("VOICE_READOUT_HOME", tempfile.mkdtemp(prefix="voice-readout-tests-"))
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 

@@ -2,8 +2,8 @@
   "$schema": "https://antigravity.google/schemas/v1/plugin.json",
   "name": "voice-readout",
   "displayName": "Voice Readout",
-  "version": "1.1.0",
-  "description": "Reads out or explains Antigravity CLI responses as natural spoken audio using high-definition neural voices.",
+  "version": "2.0.0",
+  "description": "Reads out or explains agent responses as natural speech with neural voices, including every command to run.",
   "suggestedPrompts": [
     "/readout stop",
     "/readout replay",

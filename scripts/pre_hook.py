@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-pre_hook.py - PreInvocation hook for voice-readout.
+pre_hook.py - Instant /readout handling, before the model runs.
 
-Intercepts /readout commands before the model generates reasoning or tool calls.
-Executes the toggle/configuration action instantly in <1ms and injects the result
-so the model confirms it in a single quick step without wasting time on deliberation
-or tool invocation round-trips.
+- agy (PreInvocation): executes the action and injects the result so the model
+  confirms it in a single quick step without tool calls.
+- Claude Code (UserPromptExpansion): executes the action and blocks the command's
+  expansion, so it never costs a model turn; the result is shown to the user.
 """
 
 import json
@@ -20,15 +20,13 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
+import state
 import toggle
-
-LOG_FILE = Path.home() / ".gemini" / "antigravity-cli" / "voice_readout_hook.log"
-
 
 def log_event(message: str):
     try:
-        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
+        state.LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(state.LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"[{datetime.now().isoformat()}] {message}\n")
     except Exception:
         pass
@@ -100,18 +98,77 @@ def execute_toggle_action(args):
             return f"Current voice: {config.get('voice', 'en-US-AvaNeural')}"
 
     elif action == "status":
-        state = "ENABLED" if config.get("enabled", True) else "DISABLED"
+        status = "ENABLED" if config.get("enabled", True) else "DISABLED"
         symbol = "🔊" if config.get("enabled", True) else "🔇"
         mode = config.get("mode", "explain").upper()
         voice = config.get("voice", "en-US-AvaNeural")
-        return f"{symbol} Voice readout status: {state} | Mode: {mode} | Voice: {voice}"
+        return f"{symbol} Voice readout status: {status} | Mode: {mode} | Voice: {voice}"
 
     return None
 
 
+def handle_agy(payload: dict, start_time: float) -> dict:
+    hook_output = {"injectSteps": []}
+    transcript_path_str = payload.get("transcriptPath")
+    if not transcript_path_str or not os.path.exists(transcript_path_str):
+        return hook_output
+
+    with open(transcript_path_str, "r", encoding="utf-8", errors="replace") as f:
+        lines = f.readlines()
+
+    latest_user_prompt = ""
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            step = json.loads(line)
+            if step.get("type") == "USER_INPUT":
+                latest_user_prompt = step.get("content", "")
+                break
+        except Exception:
+            continue
+
+    args = parse_readout_command(latest_user_prompt)
+    clean_prompt = re.sub(r"<[^>]+>", "", latest_user_prompt).strip().split("\n")[0]
+
+    if args is not None:
+        result_msg = execute_toggle_action(args)
+        elapsed_ms = (time.time() - start_time) * 1000
+        log_event(f"Intercepted '{clean_prompt}' -> Executed {args} in {elapsed_ms:.2f}ms -> Result: '{result_msg}'")
+
+        if result_msg:
+            hook_output["injectSteps"].append({
+                "ephemeralMessage": (
+                    f"[Voice Readout System]: The command has already been executed instantly:\n"
+                    f"{result_msg}\n\n"
+                    f"CRITICAL: Do NOT call run_command or any tool. Output the exact confirmation message above directly."
+                )
+            })
+    return hook_output
+
+
+def handle_claude_expansion(payload: dict, start_time: float):
+    """Runs `/readout <action>` and blocks the expansion. Unknown actions fall through to the skill."""
+    name = (payload.get("command_name") or "").lstrip("/").split(":")[-1]
+    if name != "readout":
+        return None
+    args = (payload.get("command_args") or "").split()
+    result_msg = execute_toggle_action(args)
+    elapsed_ms = (time.time() - start_time) * 1000
+    log_event(f"Claude Code /readout {' '.join(args)} -> {elapsed_ms:.2f}ms -> Result: '{result_msg}'")
+    if not result_msg:
+        return None
+    return {
+        "decision": "block",
+        "reason": result_msg,
+        "hookSpecificOutput": {"hookEventName": "UserPromptExpansion", "suppressOriginalPrompt": True},
+    }
+
+
 def main():
     start_time = time.time()
-    hook_output = {"injectSteps": []}
+    hook_output = {"injectSteps": []}  # agy expects this shape even when nothing happens
 
     try:
         raw_input = sys.stdin.read()
@@ -119,47 +176,18 @@ def main():
             return  # the finally block writes the (empty) hook output exactly once
 
         payload = json.loads(raw_input)
-        transcript_path_str = payload.get("transcriptPath")
-
-        if transcript_path_str and os.path.exists(transcript_path_str):
-            with open(transcript_path_str, "r", encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
-
-            latest_user_prompt = ""
-            for line in reversed(lines):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    step = json.loads(line)
-                    if step.get("type") == "USER_INPUT":
-                        latest_user_prompt = step.get("content", "")
-                        break
-                except Exception:
-                    continue
-
-            args = parse_readout_command(latest_user_prompt)
-            clean_prompt = re.sub(r"<[^>]+>", "", latest_user_prompt).strip().split("\n")[0]
-
-            if args is not None:
-                result_msg = execute_toggle_action(args)
-                elapsed_ms = (time.time() - start_time) * 1000
-                log_event(f"Intercepted '{clean_prompt}' -> Executed {args} in {elapsed_ms:.2f}ms -> Result: '{result_msg}'")
-
-                if result_msg:
-                    hook_output["injectSteps"].append({
-                        "ephemeralMessage": (
-                            f"[Voice Readout System]: The command has already been executed instantly:\n"
-                            f"{result_msg}\n\n"
-                            f"CRITICAL: Do NOT call run_command or any tool. Output the exact confirmation message above directly."
-                        )
-                    })
+        if payload.get("hook_event_name") == "UserPromptExpansion":
+            hook_output = None  # Claude Code: print nothing unless we handle the command
+            hook_output = handle_claude_expansion(payload, start_time)
+        else:
+            hook_output = handle_agy(payload, start_time)
 
     except Exception as e:
         log_event(f"Error in pre_hook: {e}")
     finally:
-        sys.stdout.write(json.dumps(hook_output) + "\n")
-        sys.stdout.flush()
+        if hook_output is not None:
+            sys.stdout.write(json.dumps(hook_output) + "\n")
+            sys.stdout.flush()
 
 
 if __name__ == "__main__":
