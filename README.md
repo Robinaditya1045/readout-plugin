@@ -1,30 +1,28 @@
 # Antigravity Voice Readout Plugin (`voice-readout`)
 
-An open-source plugin for **Google Antigravity CLI (`agy`)** that automatically reads out agent responses as spoken audio via your operating system's Text-to-Speech (TTS) engine.
+An open-source plugin for **Google Antigravity CLI (`agy`)** that automatically reads out agent responses as natural, high-definition spoken audio using neural voices (similar to Google Assistant and Siri).
 
 ---
 
 ## Features
 
-- 🎙️ **Hands-Free Readout**: Speaks the final model response automatically at the end of each turn.
-- 🧹 **Intelligent Markdown Cleaner**: Strips out code blocks, markdown links, asterisks, headers, and noisy syntax so the voice audio sounds natural and clean.
-- ⚡ **Non-Blocking & Asynchronous**: Spawns TTS in a detached background process so Antigravity CLI responses and commands never freeze or wait on speech completion.
-- 🎛️ **Slash Command & Toggle Support**: Easily toggle speech on or off with `/readout on` and `/readout off` or inspect state with `/readout status`.
-- 🌐 **Cross-Platform**:
-  - **Linux**: Uses `spd-say` (speech-dispatcher) with fallback to `espeak-ng` or `espeak`.
-  - **macOS**: Uses native `say`.
-  - **Windows**: Uses PowerShell SAPI (`System.Speech.Synthesis`).
+- 🎙️ **Natural Neural Voices**: Uses state-of-the-art neural speech synthesis (via Microsoft Edge Neural TTS and Google TTS). No more robotic or cracked audio!
+- ⚡ **Non-Blocking Playback**: Spawns synthesis and audio playback in a detached background process via `ffplay`/`mpv`, so `agy` turns finish instantly without hanging the terminal.
+- 🧹 **Intelligent Markdown Cleaner**: Strips out code blocks, markdown links, asterisks, headers, and noisy syntax so speech flows naturally like conversation.
+- 🛑 **Automatic Speech Interruption**: Cancels any previous speech as soon as a new response arrives to prevent overlapping audio.
+- 🎛️ **Slash Command & Voice Selector**: Choose your favorite assistant voice (`siri`, `ava`, `andrew`, `emma`, `brian`, `google`) or mute/unmute at will.
+- 🌐 **Offline Fallback**: Automatically falls back to local system TTS (`spd-say` / `say` / PowerShell) if internet is unavailable.
 
 ---
 
 ## How It Works (Antigravity Lifecycle Hooks)
 
-Antigravity CLI plugins execute lifecycle hooks defined in `hooks.json`. When a turn completes, Antigravity fires the **`Stop`** hook. 
+When the agent finishes generating a response turn, Antigravity CLI triggers the **`Stop`** lifecycle hook defined in `hooks.json`. 
 
-Unlike older or hypothetical documentation snippets:
-- Context is passed to hook scripts via **JSON on `stdin`** (including `transcriptPath`, `conversationId`, etc.).
-- The hook must output a JSON object (`{}`) on `stdout`.
-- The plugin inspects the conversation log (`transcript_full.jsonl`) to retrieve the model's final response, formats the text, and feeds it to your system TTS engine.
+- The hook script receives turn metadata via **JSON on `stdin`**, including `transcriptPath`.
+- It reads the latest model output from `transcript_full.jsonl`.
+- It cleans the markdown and passes the plain text to the neural audio player.
+- It returns `{}` immediately on `stdout` to satisfy Antigravity's hook contract.
 
 ---
 
@@ -37,8 +35,9 @@ voice_readout_plugin/
 ├── commands/
 │   └── readout.md           # Slash command definition (/readout)
 ├── scripts/
-│   ├── readout.py           # Hook handler and speech pipeline
-│   └── toggle.py            # CLI toggle and configuration utility
+│   ├── readout.py           # Hook entry point and text cleaning
+│   ├── player.py            # Neural TTS synthesis and audio playback
+│   └── toggle.py            # CLI toggle and voice switcher
 ├── tests/
 │   └── test_readout.py      # Unit tests
 └── README.md
@@ -46,92 +45,76 @@ voice_readout_plugin/
 
 ---
 
-## Installation
+## Installation & Setup
 
-### 1. Install via Antigravity CLI
+### 1. Requirements
 
-From this repository directory, install the plugin into your global Antigravity configuration:
+- Python 3.8+
+- Audio player (`ffplay` or `mpv`):
+  ```bash
+  sudo apt install ffmpeg  # provides ffplay
+  ```
+- Neural TTS packages:
+  ```bash
+  pip install --user edge-tts gtts
+  ```
+
+### 2. Install the Plugin in Antigravity CLI
+
+From this directory:
 
 ```bash
 agy plugin install .
 ```
 
-Verify that the plugin is installed:
+Verify that it appears in your plugin list:
 
 ```bash
 agy plugin list
 ```
 
-### 2. Verify Your System TTS Engine
-
-- **Linux (Ubuntu/Debian)**:
-  Ensure `speech-dispatcher` or `espeak-ng` is installed:
-  ```bash
-  sudo apt install speech-dispatcher
-  spd-say "TTS is configured"
-  ```
-- **macOS**:
-  `say` is built-in.
-- **Windows**:
-  PowerShell SAPI is built-in.
-
 ---
 
-## Usage
+## Voice Selection & Commands
 
-Once installed, simply chat with `agy`:
+### Changing Voices
+
+Choose from several high-quality natural voices:
 
 ```bash
-agy -p "Summarize how neural networks learn in 2 sentences"
+python3 scripts/toggle.py voice siri     # Female assistant (en-US-AvaNeural)
+python3 scripts/toggle.py voice andrew   # Male assistant (en-US-AndrewNeural)
+python3 scripts/toggle.py voice emma     # Warm conversational female (en-US-EmmaNeural)
+python3 scripts/toggle.py voice brian    # Professional male (en-US-BrianNeural)
+python3 scripts/toggle.py voice google   # Classic Google voice (gTTS)
 ```
 
-The response text will be displayed in the terminal and spoken aloud simultaneously.
+List all available presets:
+```bash
+python3 scripts/toggle.py voice
+```
 
-### Slash Commands & Toggling
+### Toggling & Testing
 
-You can control voice readout at any time:
-
-- **Inside `agy`**: Type `/readout on` or `/readout off`.
-- **From terminal**:
-  ```bash
-  python3 scripts/toggle.py off    # Silence voice readout
-  python3 scripts/toggle.py on     # Re-enable voice readout
-  python3 scripts/toggle.py status # Check current configuration
-  python3 scripts/toggle.py test   # Play a test speech sample
-  ```
+- **Disable voice**: `python3 scripts/toggle.py off`
+- **Enable voice**: `python3 scripts/toggle.py on`
+- **Check status**: `python3 scripts/toggle.py status`
+- **Test audio**: `python3 scripts/toggle.py test`
 
 ---
 
 ## Configuration
 
-Preferences are stored in `~/.gemini/antigravity-cli/voice_readout_config.json`:
+Settings are saved in `~/.gemini/antigravity-cli/voice_readout_config.json`:
 
 ```json
 {
   "enabled": true,
   "max_chars": 2000,
-  "cancel_previous": true,
-  "include_code_notice": true,
-  "speech_rate": 0,
-  "engine": "auto"
+  "voice": "en-US-AvaNeural",
+  "speech_rate": "+0%",
+  "include_code_notice": true
 }
-```
-
-- **`enabled`**: Set `false` to mute readout.
-- **`max_chars`**: Maximum number of characters to read before truncating.
-- **`cancel_previous`**: Cancel any ongoing speech when a new response arrives.
-- **`include_code_notice`**: Replaces code blocks with `"code block omitted"` instead of reading raw code.
-- **`speech_rate`**: Speed modifier for `spd-say` (-100 to 100).
-- **`engine`**: Force a specific engine (`"spd-say"`, `"espeak-ng"`, `"say"`, or `"auto"`).
-
----
-
-## Running Tests
-
-Run the test suite using `unittest`:
-
-```bash
-python3 -m unittest discover tests
 ```
 
 ---

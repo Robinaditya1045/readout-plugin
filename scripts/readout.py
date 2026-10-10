@@ -2,15 +2,15 @@
 """
 voice-readout hook script for Google Antigravity CLI (agy).
 Executed automatically on the 'Stop' lifecycle event to read out the model's
-response as spoken audio using the system TTS engine.
+response as natural spoken audio using high-definition neural voices (Siri/Google Assistant style).
 """
 
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 CONFIG_PATH = Path.home() / ".gemini" / "antigravity-cli" / "voice_readout_config.json"
@@ -18,10 +18,9 @@ CONFIG_PATH = Path.home() / ".gemini" / "antigravity-cli" / "voice_readout_confi
 DEFAULT_CONFIG = {
     "enabled": True,
     "max_chars": 2000,
-    "cancel_previous": True,
+    "voice": "en-US-AvaNeural",  # Natural assistant voice (Siri / Google Assistant quality)
+    "speech_rate": "+0%",
     "include_code_notice": True,
-    "speech_rate": 0,  # For spd-say (-100 to 100)
-    "engine": "auto",  # "auto", "spd-say", "espeak-ng", "espeak", "say", "powershell"
 }
 
 
@@ -84,7 +83,6 @@ def clean_markdown_for_speech(text: str, include_code_notice: bool = True, max_c
 
     # Truncate if too long to prevent endless reading
     if max_chars and len(text) > max_chars:
-        # Try to cut off at the last period/sentence within limit
         cut_text = text[:max_chars]
         last_punct = max(cut_text.rfind("."), cut_text.rfind("!"), cut_text.rfind("?"))
         if last_punct > max_chars // 2:
@@ -117,7 +115,6 @@ def extract_model_response(hook_input: dict) -> str:
         return ""
 
     try:
-        # Read the file and inspect lines in reverse to find the latest model response
         with open(target_path, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
 
@@ -130,7 +127,6 @@ def extract_model_response(hook_input: dict) -> str:
             except Exception:
                 continue
 
-            # Look for model step with PLANNER_RESPONSE
             if step.get("source") == "MODEL" and step.get("type") == "PLANNER_RESPONSE":
                 content = step.get("content")
                 if content:
@@ -145,57 +141,42 @@ def speak_text(text: str, config: dict) -> None:
     if not text:
         return
 
-    engine = config.get("engine", "auto")
-    cancel_prev = config.get("cancel_previous", True)
-    rate = config.get("speech_rate", 0)
+    voice = config.get("voice", "en-US-AvaNeural")
+    rate = config.get("speech_rate", "+0%")
+    if isinstance(rate, int):
+        rate = f"{rate:+d}%"
 
-    # Detect platform
-    platform = sys.platform
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+            f.write(text)
+            txt_path = f.name
 
-    cmd = None
+        script_dir = Path(__file__).resolve().parent
+        player_script = script_dir / "player.py"
 
-    if platform.startswith("linux"):
-        if engine in ("auto", "spd-say") and shutil.which("spd-say"):
-            if cancel_prev:
-                try:
-                    subprocess.run(["spd-say", "-C"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except Exception:
-                    pass
-            cmd = ["spd-say"]
-            if rate:
-                cmd.extend(["-r", str(rate)])
-            cmd.append(text)
-        elif (engine in ("auto", "espeak-ng") and shutil.which("espeak-ng")) or (
-            engine in ("auto", "espeak") and shutil.which("espeak")
-        ):
-            binary = "espeak-ng" if shutil.which("espeak-ng") else "espeak"
-            cmd = [binary, text]
+        cmd = [
+            sys.executable,
+            str(player_script),
+            "--voice",
+            str(voice),
+            "--rate",
+            str(rate),
+            "--file",
+            txt_path,
+        ]
 
-    elif platform == "darwin":
-        if shutil.which("say"):
-            cmd = ["say", text]
-
-    elif platform in ("win32", "cygwin"):
-        # PowerShell SAPI
-        escaped = text.replace("'", "''")
-        ps_code = f"Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('{escaped}')"
-        cmd = ["powershell", "-NoProfile", "-Command", ps_code]
-
-    if cmd:
-        try:
-            # Spawn non-blocking background process
-            subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except Exception:
-            pass
+        # Spawn player in a detached process session so agent loop is completely non-blocking
+        subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        pass
 
 
 def main():
-    # Always guarantee {} is printed to stdout so Antigravity CLI hook contract is satisfied
     hook_output = "{}"
 
     try:
@@ -209,9 +190,7 @@ def main():
 
         config = load_config()
 
-        # Check if enabled
         if config.get("enabled", True):
-            # Only speak if not stopped due to an error
             err = hook_input.get("error")
             if not err:
                 response_text = extract_model_response(hook_input)

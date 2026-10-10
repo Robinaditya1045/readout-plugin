@@ -1,17 +1,14 @@
 ---
 name: readout
-description: Control or toggle the voice readout text-to-speech plugin (on, off, or status).
+description: Control the voice readout text-to-speech plugin (toggle on/off, change neural voice, or status).
 ---
 
 # Voice Readout Command
 
-When the user types `/readout on`, `/readout off`, or `/readout status`, run the toggle script:
+When the user types `/readout`, execute the corresponding command:
 
-- To enable voice readout:
-  `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py on`
-
-- To disable voice readout:
-  `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py off`
-
-- To check status:
-  `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py status`
+- Toggle on: `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py on`
+- Toggle off: `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py off`
+- Check status: `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py status`
+- Switch voice: `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py voice <siri|andrew|emma|brian|google|ava>`
+- Test audio: `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py test`
