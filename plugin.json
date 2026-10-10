@@ -1,0 +1,5 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "voice-readout",
+  "description": "Automatically reads out agent responses using system Text-to-Speech (TTS)."
+}

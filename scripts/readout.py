@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""
+voice-readout hook script for Google Antigravity CLI (agy).
+Executed automatically on the 'Stop' lifecycle event to read out the model's
+response as spoken audio using the system TTS engine.
+"""
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+CONFIG_PATH = Path.home() / ".gemini" / "antigravity-cli" / "voice_readout_config.json"
+
+DEFAULT_CONFIG = {
+    "enabled": True,
+    "max_chars": 2000,
+    "cancel_previous": True,
+    "include_code_notice": True,
+    "speech_rate": 0,  # For spd-say (-100 to 100)
+    "engine": "auto",  # "auto", "spd-say", "espeak-ng", "espeak", "say", "powershell"
+}
+
+
+def load_config() -> dict:
+    config = dict(DEFAULT_CONFIG)
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                user_config = json.load(f)
+                config.update(user_config)
+        except Exception:
+            pass
+    return config
+
+
+def clean_markdown_for_speech(text: str, include_code_notice: bool = True, max_chars: int = 2000) -> str:
+    if not text:
+        return ""
+
+    # Remove internal thinking tags if any appear in content
+    text = re.sub(r"<thought>.*?</thought>", "", text, flags=re.DOTALL)
+    text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL)
+
+    # Handle fenced code blocks
+    code_notice = " code block omitted. " if include_code_notice else " "
+    text = re.sub(r"```[\w-]*\n[\s\S]*?```", code_notice, text)
+
+    # Handle HTML tags
+    text = re.sub(r"<[^>]+>", " ", text)
+
+    # Replace markdown links [text](url) with just text
+    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
+
+    # Remove image links ![alt](url)
+    text = re.sub(r"!\[([^\]]*)\]\([^\)]+\)", "", text)
+
+    # Replace inline code `code` with code
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+
+    # Remove bold/italic markers
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"\*([^*]+)\*", r"\1", text)
+    text = re.sub(r"__([^_]+)__", r"\1", text)
+    text = re.sub(r"_([^_]+)_", r"\1", text)
+
+    # Remove markdown header hashes
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+
+    # Remove blockquotes and list bullets
+    text = re.sub(r"^[>\s*+-]+\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\d+\.\s+", "", text, flags=re.MULTILINE)
+
+    # Remove horizontal rules
+    text = re.sub(r"^[ \t]*[-*_]{3,}[ \t]*$", "", text, flags=re.MULTILINE)
+
+    # Normalize whitespace
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{2,}", "\n", text)
+    text = text.strip()
+
+    # Truncate if too long to prevent endless reading
+    if max_chars and len(text) > max_chars:
+        # Try to cut off at the last period/sentence within limit
+        cut_text = text[:max_chars]
+        last_punct = max(cut_text.rfind("."), cut_text.rfind("!"), cut_text.rfind("?"))
+        if last_punct > max_chars // 2:
+            text = cut_text[: last_punct + 1] + " Response truncated."
+        else:
+            text = cut_text.rstrip() + "... Response truncated."
+
+    return text
+
+
+def extract_model_response(hook_input: dict) -> str:
+    # 1. Check direct environment variable if set
+    env_text = os.environ.get("ANTIGRAVITY_RESPONSE_TEXT")
+    if env_text:
+        return env_text
+
+    # 2. Extract from transcriptPath passed in hook JSON
+    transcript_path_str = hook_input.get("transcriptPath")
+    if not transcript_path_str:
+        return ""
+
+    transcript_path = Path(transcript_path_str)
+
+    # If transcriptPath points to transcript.jsonl or transcript_full.jsonl,
+    # prefer transcript_full.jsonl if present in the same directory
+    full_path = transcript_path.parent / "transcript_full.jsonl"
+    target_path = full_path if full_path.exists() else transcript_path
+
+    if not target_path.exists():
+        return ""
+
+    try:
+        # Read the file and inspect lines in reverse to find the latest model response
+        with open(target_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                step = json.loads(line)
+            except Exception:
+                continue
+
+            # Look for model step with PLANNER_RESPONSE
+            if step.get("source") == "MODEL" and step.get("type") == "PLANNER_RESPONSE":
+                content = step.get("content")
+                if content:
+                    return content
+    except Exception:
+        pass
+
+    return ""
+
+
+def speak_text(text: str, config: dict) -> None:
+    if not text:
+        return
+
+    engine = config.get("engine", "auto")
+    cancel_prev = config.get("cancel_previous", True)
+    rate = config.get("speech_rate", 0)
+
+    # Detect platform
+    platform = sys.platform
+
+    cmd = None
+
+    if platform.startswith("linux"):
+        if engine in ("auto", "spd-say") and shutil.which("spd-say"):
+            if cancel_prev:
+                try:
+                    subprocess.run(["spd-say", "-C"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+            cmd = ["spd-say"]
+            if rate:
+                cmd.extend(["-r", str(rate)])
+            cmd.append(text)
+        elif (engine in ("auto", "espeak-ng") and shutil.which("espeak-ng")) or (
+            engine in ("auto", "espeak") and shutil.which("espeak")
+        ):
+            binary = "espeak-ng" if shutil.which("espeak-ng") else "espeak"
+            cmd = [binary, text]
+
+    elif platform == "darwin":
+        if shutil.which("say"):
+            cmd = ["say", text]
+
+    elif platform in ("win32", "cygwin"):
+        # PowerShell SAPI
+        escaped = text.replace("'", "''")
+        ps_code = f"Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('{escaped}')"
+        cmd = ["powershell", "-NoProfile", "-Command", ps_code]
+
+    if cmd:
+        try:
+            # Spawn non-blocking background process
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception:
+            pass
+
+
+def main():
+    # Always guarantee {} is printed to stdout so Antigravity CLI hook contract is satisfied
+    hook_output = "{}"
+
+    try:
+        raw_input = sys.stdin.read()
+        hook_input = {}
+        if raw_input.strip():
+            try:
+                hook_input = json.loads(raw_input)
+            except Exception:
+                pass
+
+        config = load_config()
+
+        # Check if enabled
+        if config.get("enabled", True):
+            # Only speak if not stopped due to an error
+            err = hook_input.get("error")
+            if not err:
+                response_text = extract_model_response(hook_input)
+                cleaned = clean_markdown_for_speech(
+                    response_text,
+                    include_code_notice=config.get("include_code_notice", True),
+                    max_chars=config.get("max_chars", 2000),
+                )
+                if cleaned:
+                    speak_text(cleaned, config)
+
+    except Exception:
+        pass
+    finally:
+        sys.stdout.write(hook_output + "\n")
+        sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()

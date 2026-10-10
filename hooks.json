@@ -1,0 +1,11 @@
+{
+  "voice-readout": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "python3 scripts/readout.py",
+        "timeout": 30
+      }
+    ]
+  }
+}
