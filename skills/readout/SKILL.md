@@ -14,6 +14,8 @@ description: Instantly toggle or configure voice readout text-to-speech without 
 
 - `/readout on` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py on`
 - `/readout off` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py off`
+- `/readout stop` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py stop`
+- `/readout replay` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py replay`
 - `/readout mode explain` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py mode explain`
 - `/readout mode direct` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py mode direct`
 - `/readout voice <name>` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py voice <name>`

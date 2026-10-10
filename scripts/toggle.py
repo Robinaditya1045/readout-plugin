@@ -7,6 +7,8 @@ Usage:
   python3 scripts/toggle.py mode [explain|direct]
   python3 scripts/toggle.py voice [name]
   python3 scripts/toggle.py status
+  python3 scripts/toggle.py stop
+  python3 scripts/toggle.py replay
   python3 scripts/toggle.py test
 """
 
@@ -16,9 +18,24 @@ from pathlib import Path
 
 # Add scripts directory to path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from player import VOICE_ALIASES
+from player import LAST_TEXT_FILE, VOICE_ALIASES, stop_playback
 
 CONFIG_PATH = Path.home() / ".gemini" / "antigravity-cli" / "voice_readout_config.json"
+
+OFF_ACTIONS = ("off", "disable", "mute")
+STOP_ACTIONS = ("stop", "skip", "hush", "shh")
+REPLAY_ACTIONS = ("replay", "repeat", "again")
+# Actions that start or stop audio themselves; their agy turn must not be read out afterwards.
+AUDIO_ACTIONS = STOP_ACTIONS + REPLAY_ACTIONS + ("test",)
+
+TEST_MARKDOWN = """
+The configuration has been updated successfully.
+To apply changes, run:
+```bash
+agy plugin list
+```
+Would you like to test another voice?
+"""
 
 
 def load_config() -> dict:
@@ -44,6 +61,33 @@ def save_config(config: dict) -> None:
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
+
+
+def stop_speech() -> str:
+    if stop_playback():
+        return "⏹️ Stopped the current readout."
+    return "Nothing is being read out right now."
+
+
+def replay_last(config: dict) -> str:
+    try:
+        text = LAST_TEXT_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        text = ""
+    if not text:
+        return "Nothing to replay yet."
+    from readout import speak_text
+
+    speak_text(text, config)
+    return "🔁 Replaying the last readout."
+
+
+def speak_test(config: dict) -> str:
+    from readout import prepare_speech_content, speak_text
+
+    spoken = prepare_speech_content(TEST_MARKDOWN, config)
+    speak_text(spoken, config)
+    return f"🔊 Testing [{config.get('mode', 'explain').upper()} mode]: \"{spoken}\""
 
 
 def print_available_voices():
@@ -83,10 +127,17 @@ def main():
         save_config(config)
         print("🔊 Voice readout ENABLED. Model responses will be spoken aloud.")
 
-    elif action in ("off", "disable", "stop"):
+    elif action in OFF_ACTIONS:
         config["enabled"] = False
         save_config(config)
+        stop_playback()
         print("🔇 Voice readout DISABLED. Responses will remain silent.")
+
+    elif action in STOP_ACTIONS:
+        print(stop_speech())
+
+    elif action in REPLAY_ACTIONS:
+        print(replay_last(config))
 
     elif action == "mode":
         if len(args) > 1:
@@ -126,22 +177,10 @@ def main():
         print(f"   Config file: {CONFIG_PATH}")
 
     elif action == "test":
-        from readout import prepare_speech_content, speak_text
-        test_markdown = """
-The configuration has been updated successfully.
-To apply changes, run:
-```bash
-agy plugin list
-```
-Would you like to test another voice?
-"""
-        spoken = prepare_speech_content(test_markdown, config)
-        print(f"Testing [{config.get('mode', 'explain').upper()} mode]: \"{spoken}\"")
-        speak_text(spoken, config)
-        print("Audio playback triggered!")
+        print(speak_test(config))
 
     else:
-        print("Usage: toggle.py [on|off|mode [explain|direct]|voice [name]|status|test]")
+        print("Usage: readout [on|off|stop|replay|mode [explain|direct]|voice [name]|status|test]")
         sys.exit(1)
 
 
