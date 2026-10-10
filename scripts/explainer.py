@@ -3,218 +3,391 @@
 explainer.py - Intelligent conversational explainer for Google Antigravity responses.
 
 Transforms long, markdown-heavy agent responses into concise, spoken explanations.
-Instead of reading every line verbatim, it extracts:
-1. Core diagnosis / direct takeaway
-2. High-level choices or solution methods
-3. Key actionable terminal commands (spoken naturally)
-4. Modified files or code snippets
-5. Closing questions or next steps
+Short responses are read in full. Longer ones are walked section by section:
+1. The opening takeaway / diagnosis
+2. Each section's gist: its lead sentences, list highlights, or table rows
+3. Every terminal command, in order, next to the step or option it belongs to
+4. Code snippets, diagrams and output that only make sense on screen
+5. Warnings, and the closing question or next step
 """
 
 import os
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
+
+from markdown_speech import (
+    Block,
+    ListItem,
+    clean_inline,
+    describe_code,
+    end_sentence,
+    extract_commands,
+    is_inline_command,
+    is_shell_block,
+    parse_markdown,
+    render_full,
+    shorten,
+    single_line_value,
+    speak_command,
+    split_sentences,
+    strip_thinking,
+)
+
+SHORT_RESPONSE_CHARS = 320  # spoken length below which a response is read in full
+DEFAULT_BUDGET = 1000  # soft cap on spoken prose; commands and warnings are never cut by it
+MAX_COMMANDS = 15
+
+OPTION_RE = re.compile(r"^(?i:method|option|approach|solution|alternative|fix|workaround|way|plan)\s+(?:\d+|[A-Z])\b")
+STEP_RE = re.compile(r"^(?i:step|part|phase|stage)\s+\d+\b")
+GENERIC_TITLES = {
+    "summary", "overview", "details", "tl;dr", "tldr", "result", "results", "response", "answer", "explanation",
+}
+ALERT_PREFIX_RE = re.compile(r"^(note|tip|important|warning|caution|heads up)\s*[:\-—]\s*", re.IGNORECASE)
+RUN_VERB_RE = re.compile(
+    r"\b(run|running|execute|executing|type|typing|enter|paste|use|using|add|append)\b", re.IGNORECASE
+)
+INLINE_RUN_RE = re.compile(r"\b(?:run|running|execute|type|enter)\b[^`\n]{0,30}`([^`\n]+)`", re.IGNORECASE)
+QUESTION_RE = re.compile(r"\b(would you|should i|do you|which|what|shall i|want me|prefer)\b", re.IGNORECASE)
+CLOSING_PREFIXES = (
+    "would you like", "let me know", "should i", "do you want", "shall i", "want me to", "if you'd like",
+    "if you want", "next,",
+)
 
 
-def is_shell_language(lang: str, code: str) -> bool:
-    lang = lang.lower().strip()
-    if lang in ("bash", "sh", "zsh", "shell", "terminal", "console", "cmd", "powershell"):
-        return True
-    first_line = code.strip().split("\n")[0].strip() if code.strip() else ""
-    if first_line.startswith(("$", ">", "sudo ", "npm ", "git ", "pip ", "python3 ", "apt ", "docker ", "cargo ", "yarn ", "pnpm ")):
-        return True
-    return False
+def _norm(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
 
 
-def extract_commands_from_code(code: str) -> List[str]:
-    lines = [line.strip() for line in code.split("\n")]
-    cmds = []
-    for line in lines:
-        if not line or line.startswith("#"):
+def _join_and(items: List[str]) -> str:
+    if len(items) <= 2:
+        return " and ".join(items)
+    return ", ".join(items[:-1]) + ", and " + items[-1]
+
+
+class _Brief:
+    """Accumulates spoken parts while tracking the prose budget and the command cap."""
+
+    def __init__(self, budget: int):
+        self.budget = budget
+        self.parts: List[str] = []
+        self.commands_seen: List[str] = []
+        self.commands_skipped = 0
+        self.also_covers: List[str] = []
+
+    def add(self, text: str) -> None:
+        if text:
+            self.parts.append(text)
+
+    def length(self) -> int:
+        return sum(len(p) for p in self.parts)
+
+    def over_budget(self) -> bool:
+        return self.length() >= self.budget
+
+    def contains(self, text: str) -> bool:
+        return _norm(text) in _norm(" ".join(self.parts))
+
+    def take_commands(self, raw_commands: List[str]) -> List[str]:
+        """Speakable versions of commands not already said, within the overall cap."""
+        taken: List[str] = []
+        for raw in raw_commands:
+            cmd = speak_command(raw)
+            key = _norm(cmd)
+            if not key or key in self.commands_seen:
+                continue
+            self.commands_seen.append(key)
+            if len(self.commands_seen) > MAX_COMMANDS:
+                self.commands_skipped += 1
+                continue
+            taken.append(cmd)
+        return taken
+
+    def text(self) -> str:
+        return re.sub(r"\s+", " ", " ".join(self.parts)).strip()
+
+
+def _commands_phrase(cmds: List[str], label: str = "") -> str:
+    if not cmds:
+        return ""
+    joined = "; then ".join(cmds)
+    if label:
+        return end_sentence(f"{label}: {joined}" if RUN_VERB_RE.search(label) else f"{label}: run {joined}")
+    return end_sentence(f"Run: {joined}")
+
+
+def _item_title(raw: str) -> str:
+    """'**Mode**: `explain`' -> 'Mode: explain'; long bold-led items keep just their bold title."""
+    m = re.match(r"^\*\*(.+?)\*\*\s*[:\-–—]?\s*(.*)$", raw.strip())
+    if m:
+        title = clean_inline(m.group(1)).rstrip(":").strip()
+        desc = clean_inline(m.group(2))
+        if not desc:
+            return title
+        if len(title.split()) <= 3 or len(desc) <= 40:
+            return f"{title}: {shorten(split_sentences(desc)[0], 100)}"
+        return title
+    text = clean_inline(raw)
+    sentences = split_sentences(text)
+    return shorten(sentences[0], 150) if sentences else ""
+
+
+def _shell_commands(code) -> List[str]:
+    return extract_commands(code) if is_shell_block(code) else []
+
+
+def _inline_commands(raw: str) -> List[str]:
+    return [c for c in INLINE_RUN_RE.findall(raw) if is_inline_command(c)]
+
+
+def _item_phrase(item: ListItem, brief: _Brief) -> Tuple[str, bool]:
+    title = _item_title(item.text).rstrip(".:; ")
+    raw_cmds: List[str] = []
+    value = None
+    for code in item.code:
+        found = _shell_commands(code)
+        raw_cmds.extend(found)
+        if not found and value is None:
+            value = single_line_value(code)
+    cmds = brief.take_commands(raw_cmds)
+    if cmds:
+        joined = "; then ".join(cmds)
+        if not title:
+            return f"run {joined}", True
+        return (f"{title}: {joined}" if RUN_VERB_RE.search(title) else f"{title}: run {joined}"), True
+    if value and title:
+        return f"{title}: {value}", False
+    return title, False
+
+
+def _speak_list(block: Block, label: str, brief: _Brief, commands_only: bool) -> str:
+    cap = 5 if block.ordered else 4
+    phrases: List[str] = []
+    hidden = 0
+    for idx, item in enumerate(block.items):
+        phrase, has_cmd = _item_phrase(item, brief)
+        if not phrase:
             continue
-        clean_line = re.sub(r"^[$>]\s+", "", line).strip()
-        if clean_line:
-            cmds.append(clean_line)
-    return cmds
+        # Items past the cap are only spoken when they carry a command.
+        if (commands_only and not has_cmd) or (idx >= cap and not has_cmd):
+            hidden += 0 if commands_only else 1
+            continue
+        phrases.append(phrase)
+    if not phrases:
+        return ""
+
+    titles = [_item_title(it.text) for it in block.items]
+    if len(phrases) >= 2 and all(OPTION_RE.match(t) for t in titles):
+        body = "; or ".join(phrases)
+    elif block.ordered and len(phrases) >= 2 and not commands_only:
+        steps = [f"first, {phrases[0]}"] + [f"then, {p}" for p in phrases[1:-1]]
+        last = "and finally" if len(phrases) > 2 and not hidden else "then"
+        steps.append(f"{last}, {phrases[-1]}")
+        body = "; ".join(steps)
+    elif len(phrases) >= 3:
+        body = "; ".join(phrases[:-1]) + "; and " + phrases[-1]
+    else:
+        body = "; ".join(phrases)
+    if hidden:
+        body += f"; plus {hidden} more"
+    return end_sentence(f"{label}: {body}" if label else body)
 
 
-def clean_command_for_speech(cmd: str) -> str:
-    cmd = re.sub(r"^sudo\s+", "sudo ", cmd)
-    cmd = cmd.replace("&&", "and then").replace("||", "or")
-    cmd = re.sub(r"\s+", " ", cmd).strip()
-    return cmd
+def _speak_table(block: Block, label: str) -> str:
+    header, body = block.rows[0], block.rows[1:]
+    if not body:
+        return ""
+    if len(header) <= 3:
+        rows = []
+        for row in body[:4]:
+            cells = [clean_inline(c) for c in row]
+            text = f"{cells[0]}: {', '.join(c for c in cells[1:] if c)}" if len(cells) > 1 else cells[0]
+            rows.append(shorten(text, 90))
+        text = "; ".join(r for r in rows if r)
+        if len(body) > 4:
+            text += f"; plus {len(body) - 4} more rows"
+        return end_sentence(f"{label}: {text}" if label else text)
+    cols = [clean_inline(h) for h in header if clean_inline(h)]
+    summary = f"a table of {len(body)} rows with columns {_join_and(cols)}"
+    return end_sentence(f"{label}: {summary}" if label else f"There's {summary}")
 
 
-def clean_markdown_inline(text: str) -> str:
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
-    text = re.sub(r"!\[([^\]]*)\]\([^\)]+\)", "", text)
-    text = re.sub(r"`([^`]+)`", r"\1", text)
-    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
-    text = re.sub(r"\*([^*]+)\*", r"\1", text)
-    text = re.sub(r"__([^_]+)__", r"\1", text)
-    text = re.sub(r"_([^_]+)_", r"\1", text)
-    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
-    text = re.sub(r"^[>\s*+-]+\s+", "", text, flags=re.MULTILINE)
-    text = re.sub(r"^\d+\.\s+", "", text, flags=re.MULTILINE)
-    text = re.sub(r"^[ \t]*[-*_]{3,}[ \t]*$", "", text, flags=re.MULTILINE)
-    text = re.sub(r"[ \t]+", " ", text).strip()
-    return text
+def _alert_kind(block: Block, sentences: List[str], label: str) -> Tuple[str, List[str], str]:
+    """Detects a callout ([!WARNING] quote or 'Note:' paragraph) and strips its prefix."""
+    kind = block.alert
+    if not kind:
+        first = sentences[0] if sentences else label
+        m = ALERT_PREFIX_RE.match(first)
+        if not m:
+            return "", sentences, label
+        kind = m.group(1)
+        if sentences:
+            sentences = [first[m.end():]] + sentences[1:]
+        else:
+            label = first[m.end():]
+    return kind.capitalize(), sentences, label
 
 
-def split_sentences(text: str) -> List[str]:
-    # Split by standard sentence terminators OR newlines
-    tokens = re.split(r"(?:(?<=[.!?])|\n+)\s*", text.strip())
-    return [s.strip() for s in tokens if s.strip()]
+def _speak_section(blocks: List[Block], brief: _Brief, commands_only: bool, prose_heavy: bool) -> str:
+    out: List[str] = []
+    paragraphs = lists = tables = notes = 0
+    label = ""
+    unspoken_cmds: List[str] = []  # inline `commands` whose sentence we didn't read
+
+    def keep_unspoken(cmds: List[str], spoken: str) -> None:
+        unspoken_cmds.extend(c for c in cmds if clean_inline(f"`{c}`") not in spoken)
+
+    for k, b in enumerate(blocks):
+        nxt = blocks[k + 1] if k + 1 < len(blocks) else None
+        if b.kind in ("paragraph", "quote"):
+            sentences = split_sentences(clean_inline(b.text))
+            label = ""
+            if sentences and sentences[-1].endswith(":") and nxt is not None and nxt.kind in ("list", "code", "table"):
+                label = sentences.pop()[:-1].strip()
+            kind, sentences, label = _alert_kind(b, sentences, label)
+            if kind:
+                # Callouts are always read, but only their first sentence.
+                if sentences:
+                    alert = end_sentence(f"{kind}: {shorten(sentences[0], 200)}")
+                    out.append(alert)
+                    keep_unspoken(_inline_commands(b.text), alert)
+                elif label:
+                    label = f"{kind}: {label}"
+                continue
+            spoken = ""
+            if not commands_only and sentences and paragraphs < (4 if prose_heavy else 3):
+                chosen = sentences[:1]
+                if paragraphs == 0 and len(sentences) > 1 and len(chosen[0]) < 90:
+                    chosen.append(sentences[1])
+                # Intros that lead into something we don't read ("Here's what changed:") add nothing.
+                chosen = [s for s in chosen if not s.endswith(":")] or chosen[:1]
+                spoken = " ".join(end_sentence(shorten(s, 220)) for s in chosen)
+                out.append(spoken)
+                paragraphs += 1
+            keep_unspoken(_inline_commands(b.text), spoken)
+        elif b.kind == "list":
+            spoken = _speak_list(b, label, brief, commands_only=commands_only or lists >= 2)
+            out.append(spoken)
+            lists += 1
+            for item in b.items:
+                keep_unspoken(_inline_commands(item.text), spoken)
+            label = ""
+        elif b.kind == "table":
+            if not commands_only and tables < 2 and b.rows:
+                out.append(_speak_table(b, label))
+                tables += 1
+            label = ""
+        elif b.kind == "code":
+            cmds = _shell_commands(b.code)
+            if cmds:
+                out.append(_commands_phrase(brief.take_commands(cmds), label))
+            elif not commands_only:
+                value = single_line_value(b.code)
+                if value and label:
+                    out.append(end_sentence(f"{label}: {value}"))
+                elif notes < 2 and not value:
+                    desc = describe_code(b.code)
+                    out.append(f"{label}: there's {desc} on screen." if label else f"There's {desc} on screen.")
+                    notes += 1
+            label = ""
+
+    if unspoken_cmds:
+        out.append(_commands_phrase(brief.take_commands(unspoken_cmds)))
+    return " ".join(p for p in out if p).strip()
 
 
-def extract_closing_question(text_no_code: str) -> Optional[str]:
-    """Finds if the response ends with an actionable question for the user."""
-    clean = clean_markdown_inline(text_no_code)
-    sentences = split_sentences(clean)
-    if sentences:
-        last_s = sentences[-1]
-        if last_s.endswith("?") or any(last_s.lower().startswith(q) for q in ["would you like", "let me know", "should i", "do you want"]):
-            # Avoid picking up giant multi-sentence blocks
-            if len(last_s) < 140:
-                return last_s
+def _clean_title(raw: str) -> str:
+    title = clean_inline(raw)
+    title = re.sub(r"^\d+[.)]\s*", "", title)
+    return title.strip().rstrip(":").strip()
+
+
+def _group_sections(blocks: List[Block]) -> List[Tuple[str, List[Block]]]:
+    sections: List[Tuple[str, List[Block]]] = [("", [])]
+    for b in blocks:
+        if b.kind == "heading":
+            sections.append((_clean_title(b.text), []))
+        else:
+            sections[-1][1].append(b)
+    return [s for s in sections if s[0] or s[1]]
+
+
+def _closing_sentence(blocks: List[Block]) -> Optional[str]:
+    """The question or next step the response ends on, if any."""
+    content = [b for b in blocks if b.kind != "heading"]
+    if not content:
+        return None
+    last = content[-1]
+    if last.kind == "list" and len(content) >= 2 and content[-2].kind == "paragraph":
+        intro = split_sentences(clean_inline(content[-2].text))
+        if intro and (intro[-1].endswith("?") or (intro[-1].endswith(":") and QUESTION_RE.search(intro[-1]))):
+            choices = [_item_title(it.text).rstrip(".:;?") for it in last.items[:4]]
+            return f"{intro[-1].rstrip(':?').strip()}: {'; or '.join(c for c in choices if c)}?"
+    if last.kind not in ("paragraph", "quote"):
+        return None
+    sentences = split_sentences(clean_inline(last.text))
+    for s in reversed(sentences):
+        if s.endswith("?") and len(s) <= 220:
+            return s
+    for s in reversed(sentences):
+        if s.lower().startswith(CLOSING_PREFIXES) and len(s) <= 220:
+            return end_sentence(s)
+    if sentences and len(sentences[0]) <= 160 and not sentences[0].endswith(":"):
+        return end_sentence(sentences[0])
     return None
 
 
-def extract_methods_or_options(headers: List[str]) -> List[str]:
-    """Extracts high-level methods like 'Method 1: Enroll Key', 'Option 2: Disable Secure Boot'."""
-    options = []
-    pattern = re.compile(r"^(Method|Option|Approach|Step|Solution)\s+(\d+[:.-]?\s*.*)", re.IGNORECASE)
-    for h in headers:
-        clean_h = clean_markdown_inline(h)
-        match = pattern.match(clean_h)
-        if match:
-            title = re.sub(r"\s*\([^)]*\)", "", clean_h).strip()
-            options.append(title)
-    return options
-
-
-def summarize_commands(commands: List[str]) -> Optional[str]:
-    if not commands:
-        return None
-
-    unique_cmds = []
-    for c in commands:
-        c_clean = clean_command_for_speech(c)
-        if c_clean and c_clean not in unique_cmds:
-            unique_cmds.append(c_clean)
-
-    if not unique_cmds:
-        return None
-
-    if len(unique_cmds) == 1:
-        cmd = unique_cmds[0]
-        if len(cmd) < 70:
-            return f"Run the command: {cmd}."
-        else:
-            first_word = cmd.split()[0]
-            return f"Run the {first_word} command provided."
-
-    if len(unique_cmds) == 2:
-        c1, c2 = unique_cmds[0], unique_cmds[1]
-        if len(c1) < 50 and len(c2) < 50:
-            return f"First run: {c1}, then: {c2}."
-        else:
-            return f"Run the suggested commands, starting with: {c1.split()[0]}."
-
-    c1 = unique_cmds[0]
-    return f"There are {len(unique_cmds)} suggested commands, starting with: {c1}."
-
-
-def heuristic_explain(raw_text: str) -> str:
-    """Intelligently creates a 2-4 sentence conversational spoken brief."""
-    if not raw_text or not raw_text.strip():
+def heuristic_explain(raw_text: str, budget: int = DEFAULT_BUDGET) -> str:
+    """Creates a conversational spoken brief that scales with the response."""
+    text = strip_thinking(raw_text or "").strip()
+    if not text:
         return ""
+    blocks = parse_markdown(text)
 
-    text = re.sub(r"<thought>.*?</thought>", "", raw_text, flags=re.DOTALL)
-    text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL)
+    full = render_full(blocks, speak_code=True)
+    if len(full) <= SHORT_RESPONSE_CHARS:
+        return full
 
-    # 1. Parse code blocks and shell commands
-    code_blocks = re.findall(r"```([a-zA-Z0-9_-]*)\n([\s\S]*?)```", text)
-    shell_commands = []
-    other_code_langs = []
+    sections = _group_sections(blocks)
+    prose_heavy = not any(b.kind in ("list", "table", "code") for b in blocks)
+    n_options = sum(1 for title, _ in sections if OPTION_RE.match(title))
+    n_steps = sum(1 for title, _ in sections if STEP_RE.match(title))
+    announced = set()
+    brief = _Brief(budget)
 
-    for lang, code in code_blocks:
-        if is_shell_language(lang, code):
-            cmds = extract_commands_from_code(code)
-            shell_commands.extend(cmds)
-        else:
-            lang_label = lang.strip().lower() or "code"
-            if lang_label not in other_code_langs:
-                other_code_langs.append(lang_label)
-
-    # 2. Strip code blocks to extract pure prose
-    text_no_code = re.sub(r"```[\s\S]*?```", "", text)
-    cleaned_prose = clean_markdown_inline(text_no_code)
-
-    # If the response is pure short text without code or headers, just read it directly
-    prose_sentences = split_sentences(cleaned_prose)
-    if not code_blocks and len(prose_sentences) <= 2 and len(cleaned_prose) < 200:
-        return cleaned_prose
-
-    # 3. Extract section headers
-    headers = re.findall(r"^#{1,4}\s+(.*)$", text, flags=re.MULTILINE)
-    options = extract_methods_or_options(headers)
-
-    # 4. Extract opening lead paragraph / diagnosis
-    blocks = [b.strip() for b in text_no_code.split("\n\n") if b.strip()]
-    lead_sentence = ""
-    for b in blocks:
-        if b.startswith("#") or b.startswith("---"):
+    for title, sblocks in sections:
+        if not sblocks:
+            if title and not brief.parts:
+                brief.add(end_sentence(title))  # a title-only heading opening the response
             continue
-        clean_b = clean_markdown_inline(b)
-        s_list = split_sentences(clean_b)
-        if s_list:
-            lead_sentence = s_list[0]
-            if len(lead_sentence) < 40 and len(s_list) > 1:
-                lead_sentence += " " + s_list[1]
-            break
+        if OPTION_RE.match(title) and n_options >= 2 and "options" not in announced:
+            brief.add(f"There are {n_options} options.")
+            announced.add("options")
+        if STEP_RE.match(title) and n_steps >= 2 and "steps" not in announced:
+            brief.add(f"There are {n_steps} steps.")
+            announced.add("steps")
 
-    # If lead sentence ends with a colon (e.g. "To start the development server, run:"),
-    # clean that up so it flows nicely into the command
-    if lead_sentence.endswith(":"):
-        lead_sentence = lead_sentence[:-1] + "."
-
-    # 5. Extract closing question or next step
-    closing_q = extract_closing_question(text_no_code)
-
-    # 6. Extract command summary
-    cmd_summary = summarize_commands(shell_commands)
-
-    # 7. Compose spoken summary
-    parts = []
-    if lead_sentence:
-        parts.append(lead_sentence)
-
-    if options:
-        if len(options) == 2:
-            parts.append(f"There are two approaches: {options[0]}, or {options[1]}.")
-        elif len(options) > 2:
-            parts.append(f"Options include: {options[0]}, {options[1]}, and {options[2]}.")
+        over = brief.over_budget()
+        body = _speak_section(sblocks, brief, commands_only=over, prose_heavy=prose_heavy)
+        if not body:
+            if over and title:
+                brief.also_covers.append(title)
+            continue
+        if title and title.lower() not in GENERIC_TITLES:
+            sep = " " if title[-1] in ".!?" else ": "
+            brief.add(title + sep + body)
         else:
-            parts.append(f"Recommended approach: {options[0]}.")
+            brief.add(body)
 
-    if cmd_summary:
-        parts.append(cmd_summary)
-    elif other_code_langs:
-        langs_str = ", ".join(other_code_langs)
-        parts.append(f"A {langs_str} code snippet is provided.")
+    if brief.also_covers:
+        brief.add(end_sentence("It also covers " + _join_and(brief.also_covers[:4])))
+    if brief.commands_skipped:
+        brief.add(f"Plus {brief.commands_skipped} more commands, shown on screen.")
 
-    if closing_q:
-        if closing_q.lower() not in lead_sentence.lower():
-            parts.append(closing_q)
+    closing = _closing_sentence(blocks)
+    if closing and not brief.contains(closing):
+        brief.add(closing)
 
-    if not parts:
-        parts = prose_sentences[:2]
-
-    result = " ".join(parts).strip()
-    result = re.sub(r"\s+", " ", result)
-    return result
+    return brief.text() or full
 
 
 def try_llm_explain(text: str, api_key: str) -> Optional[str]:
@@ -226,7 +399,7 @@ def try_llm_explain(text: str, api_key: str) -> Optional[str]:
         prompt = (
             "You are a spoken voice assistant companion for an AI coding terminal. "
             "Convert the following AI assistant message into a natural, conversational, 2-to-3 sentence spoken summary. "
-            "Highlight the core takeaway, actions taken, any commands to run (phrase them clearly for speech), "
+            "Highlight the core takeaway, actions taken, every command to run (phrase them clearly for speech), "
             "and any questions asked. Do not include markdown, bullet symbols, or code blocks.\n\n"
             f"Message:\n{text}"
         )
@@ -250,8 +423,12 @@ def explain_response(raw_text: str, config: Optional[dict] = None) -> str:
     api_key = config.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
 
     if config.get("use_llm", False) and api_key:
-        llm_result = try_llm_explain(raw_text, api_key)
+        llm_result = try_llm_explain(strip_thinking(raw_text), api_key)
         if llm_result:
             return llm_result
 
-    return heuristic_explain(raw_text)
+    try:
+        budget = int(config.get("explain_max_chars", DEFAULT_BUDGET))
+    except (TypeError, ValueError):
+        budget = DEFAULT_BUDGET
+    return heuristic_explain(raw_text, budget)

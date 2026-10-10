@@ -22,6 +22,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from explainer import explain_response
+from markdown_speech import parse_markdown, render_full, strip_thinking
 
 CONFIG_PATH = Path.home() / ".gemini" / "antigravity-cli" / "voice_readout_config.json"
 
@@ -52,28 +53,8 @@ def clean_markdown_for_speech(text: str, include_code_notice: bool = True, max_c
     if not text:
         return ""
 
-    text = re.sub(r"<thought>.*?</thought>", "", text, flags=re.DOTALL)
-    text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL)
-
-    code_notice = " code block omitted. " if include_code_notice else " "
-    text = re.sub(r"```[\w-]*\n[\s\S]*?```", code_notice, text)
-
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
-    text = re.sub(r"!\[([^\]]*)\]\([^\)]+\)", "", text)
-    text = re.sub(r"`([^`]+)`", r"\1", text)
-    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
-    text = re.sub(r"\*([^*]+)\*", r"\1", text)
-    text = re.sub(r"__([^_]+)__", r"\1", text)
-    text = re.sub(r"_([^_]+)_", r"\1", text)
-    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
-    text = re.sub(r"^[>\s*+-]+\s+", "", text, flags=re.MULTILINE)
-    text = re.sub(r"^\d+\.\s+", "", text, flags=re.MULTILINE)
-    text = re.sub(r"^[ \t]*[-*_]{3,}[ \t]*$", "", text, flags=re.MULTILINE)
-
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{2,}", "\n", text)
-    text = text.strip()
+    blocks = parse_markdown(strip_thinking(text))
+    text = render_full(blocks, include_code_notice=include_code_notice)
 
     if max_chars and len(text) > max_chars:
         cut_text = text[:max_chars]
@@ -84,6 +65,16 @@ def clean_markdown_for_speech(text: str, include_code_notice: bool = True, max_c
             text = cut_text.rstrip() + "... Response truncated."
 
     return text
+
+
+def content_text(content) -> str:
+    """Step content is normally a string, but tolerate a list of text parts."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [p if isinstance(p, str) else (p.get("text") or "") for p in content if isinstance(p, (str, dict))]
+        return "\n".join(p for p in parts if p)
+    return ""
 
 
 def extract_model_response(hook_input: dict) -> str:
@@ -117,9 +108,13 @@ def extract_model_response(hook_input: dict) -> str:
             except Exception:
                 continue
 
+            # Stop at the turn boundary so a turn without a final message never
+            # re-reads the previous turn's answer.
+            if step.get("type") == "USER_INPUT":
+                break
             if step.get("source") == "MODEL" and step.get("type") == "PLANNER_RESPONSE":
-                content = step.get("content")
-                if content:
+                content = content_text(step.get("content"))
+                if content.strip():
                     return content
     except Exception:
         pass
@@ -127,14 +122,22 @@ def extract_model_response(hook_input: dict) -> str:
     return ""
 
 
+def normalize_rate(rate) -> str:
+    """edge-tts only accepts signed percentages like '+10%'; accept 10, '10', '10%' too."""
+    if isinstance(rate, (int, float)):
+        return f"{int(rate):+d}%"
+    m = re.fullmatch(r"\s*([+-]?)(\d+)\s*%?\s*", str(rate))
+    if not m:
+        return "+0%"
+    return f"{m.group(1) or '+'}{m.group(2)}%"
+
+
 def speak_text(text: str, config: dict) -> None:
     if not text:
         return
 
     voice = config.get("voice", "en-US-AvaNeural")
-    rate = config.get("speech_rate", "+0%")
-    if isinstance(rate, int):
-        rate = f"{rate:+d}%"
+    rate = normalize_rate(config.get("speech_rate", "+0%"))
 
     try:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:

@@ -30,6 +30,23 @@ VOICE_ALIASES = {
 }
 
 
+def _is_player_process(pid: int) -> bool:
+    """Guards against a stale PID file pointing at a reused, unrelated process."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return b"player.py" in f.read()
+    except FileNotFoundError:
+        if os.path.isdir("/proc"):
+            return False  # Linux and the process is gone
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
+        return "player.py" in out.stdout
+    except Exception:
+        return False
+
+
 def kill_previous_playback():
     """Cancel any ongoing speech playback to prevent overlapping voices."""
     if not PID_FILE.exists():
@@ -37,11 +54,15 @@ def kill_previous_playback():
     try:
         with open(PID_FILE, "r") as f:
             old_pid = int(f.read().strip())
-        if old_pid != os.getpid():
+        if old_pid != os.getpid() and _is_player_process(old_pid):
             try:
-                # Kill process group or process
-                os.kill(old_pid, signal.SIGTERM)
-            except ProcessLookupError:
+                # The player runs in its own session (see readout.speak_text), so killing
+                # its process group also stops the ffplay/mpv child that is producing sound.
+                if hasattr(os, "killpg"):
+                    os.killpg(old_pid, signal.SIGTERM)
+                else:
+                    os.kill(old_pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
                 pass
     except Exception:
         pass
@@ -56,6 +77,17 @@ def save_current_pid():
     PID_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(PID_FILE, "w") as f:
         f.write(str(os.getpid()))
+
+
+def release_pid_file():
+    """Remove the PID file only if it is still ours; a newer player may have replaced it."""
+    try:
+        with open(PID_FILE, "r") as f:
+            if int(f.read().strip()) != os.getpid():
+                return
+        PID_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def find_audio_player():
@@ -122,6 +154,8 @@ def main():
     parser.add_argument("--file", help="Path to text file containing speech content")
     args = parser.parse_args()
 
+    # Exit through SystemExit when a newer player cancels us, so cleanup still runs.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     kill_previous_playback()
     save_current_pid()
 
@@ -129,11 +163,15 @@ def main():
     if args.file and os.path.exists(args.file):
         with open(args.file, "r", encoding="utf-8") as f:
             text = f.read().strip()
+        try:
+            os.remove(args.file)  # temp file written by readout.speak_text
+        except Exception:
+            pass
     else:
         text = sys.stdin.read().strip()
 
     if not text:
-        PID_FILE.unlink(missing_ok=True)
+        release_pid_file()
         return
 
     player = find_audio_player()
@@ -168,7 +206,7 @@ def main():
     if not played:
         fallback_system_tts(text)
 
-    PID_FILE.unlink(missing_ok=True)
+    release_pid_file()
 
 
 if __name__ == "__main__":
