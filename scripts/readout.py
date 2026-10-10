@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-voice-readout hook script for Google Antigravity CLI (agy).
-Executed automatically on the 'Stop' lifecycle event.
+voice-readout turn-complete hook. Runs when the agent finishes a turn:
+- agy:          Stop hook (payload on stdin, response read from the transcript)
+- Claude Code:  Stop hook (payload on stdin with `last_assistant_message`)
+- Codex:        Stop hook (same) or the `notify` program (payload as the last argument)
 
 Supports two reading modes:
 1. 'direct'  : Reads the full model response directly (with markdown cleaned).
@@ -25,31 +27,8 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from explainer import explain_response
 from markdown_speech import parse_markdown, render_full, strip_thinking
 from pre_hook import parse_readout_command
+from state import load_config
 from toggle import AUDIO_ACTIONS
-
-CONFIG_PATH = Path.home() / ".gemini" / "antigravity-cli" / "voice_readout_config.json"
-
-DEFAULT_CONFIG = {
-    "enabled": True,
-    "mode": "explain",  # "explain" (conversational brief) or "direct" (verbatim readout)
-    "voice": "en-US-AvaNeural",  # Natural assistant voice
-    "speech_rate": "+0%",
-    "max_chars": 2000,
-    "include_code_notice": True,
-}
-
-
-def load_config() -> dict:
-    config = dict(DEFAULT_CONFIG)
-    if CONFIG_PATH.exists():
-        try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                user_config = json.load(f)
-                config.update(user_config)
-        except Exception:
-            pass
-    return config
-
 
 def clean_markdown_for_speech(text: str, include_code_notice: bool = True, max_chars: int = 2000) -> str:
     """Verbatim mode cleaner: strips markdown noise while preserving full text."""
@@ -131,6 +110,30 @@ def extract_model_response(hook_input: dict) -> str:
     return read_current_turn(hook_input)[1]
 
 
+def read_event(argv: list, stdin) -> dict:
+    """The hook payload: Codex `notify` passes it as the last argument, every hook uses stdin."""
+    try:
+        if len(argv) > 1 and argv[-1].lstrip().startswith("{"):
+            return json.loads(argv[-1])
+        if stdin.isatty():
+            return {}
+        raw = stdin.read()
+        return json.loads(raw) if raw.strip() else {}
+    except Exception:
+        return {}
+
+
+def turn_from_event(payload: dict) -> Tuple[str, str]:
+    """(user request, final response) for the turn that just ended, for any supported agent."""
+    if payload.get("type") == "agent-turn-complete":  # Codex notify
+        inputs = payload.get("input-messages") or []
+        request = content_text(inputs[-1]) if inputs else ""
+        return request, payload.get("last-assistant-message") or ""
+    if payload.get("hook_event_name") == "Stop":  # Claude Code and Codex hooks
+        return "", payload.get("last_assistant_message") or ""
+    return read_current_turn(payload)  # agy
+
+
 def is_audio_command(user_input: str) -> bool:
     """`/readout stop|replay|test` handle audio themselves; reading the model's
     confirmation afterwards would cut off (or undo) what they just did."""
@@ -202,20 +205,12 @@ def main():
     hook_output = "{}"
 
     try:
-        raw_input = sys.stdin.read()
-        hook_input = {}
-        if raw_input.strip():
-            try:
-                hook_input = json.loads(raw_input)
-            except Exception:
-                pass
-
+        payload = read_event(sys.argv, sys.stdin)
         config = load_config()
 
-        if config.get("enabled", True):
-            err = hook_input.get("error")
-            user_input, response_text = read_current_turn(hook_input)
-            if not err and not is_audio_command(user_input):
+        if config.get("enabled", True) and not payload.get("error"):
+            user_input, response_text = turn_from_event(payload)
+            if not is_audio_command(user_input):
                 spoken_content = prepare_speech_content(response_text, config)
                 if spoken_content:
                     speak_text(spoken_content, config)

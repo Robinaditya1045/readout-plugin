@@ -1,0 +1,27 @@
+{
+  "description": "Voice Readout: speak each finished response, and run /readout commands instantly",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/readout.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "UserPromptExpansion": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/pre_hook.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -3,17 +3,23 @@
 Unit tests for voice_readout_plugin (modes, explainer, cleaner, transcript parsing, pre_hook).
 """
 
+import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+
+# Keep every test away from the real ~/.config/voice-readout, even before setUp runs.
+os.environ["VOICE_READOUT_HOME"] = tempfile.mkdtemp(prefix="voice-readout-tests-")
 
 # Add scripts directory to sys.path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-import player
+import pre_hook
 import readout
+import state
 import toggle
 from explainer import explain_response
 from readout import (
@@ -23,6 +29,8 @@ from readout import (
     normalize_rate,
     prepare_speech_content,
     read_current_turn,
+    read_event,
+    turn_from_event,
 )
 from pre_hook import parse_readout_command, execute_toggle_action
 
@@ -32,15 +40,16 @@ class TestVoiceReadout(unittest.TestCase):
         # Never touch the real ~/.gemini state: config, PID and last-text files live in a temp dir.
         self._tmp = tempfile.TemporaryDirectory()
         tmp = Path(self._tmp.name)
-        self._saved = (toggle.CONFIG_PATH, toggle.LAST_TEXT_FILE, player.PID_FILE, readout.speak_text)
-        toggle.CONFIG_PATH = tmp / "voice_readout_config.json"
-        toggle.LAST_TEXT_FILE = tmp / "voice_readout_last.txt"
-        player.PID_FILE = tmp / "voice_readout_player.pid"
+        self._saved = (state.CONFIG_PATH, state.LEGACY_CONFIG_PATH, state.LAST_TEXT_FILE, state.PID_FILE, readout.speak_text)
+        state.CONFIG_PATH = tmp / "config.json"
+        state.LEGACY_CONFIG_PATH = tmp / "legacy_config.json"
+        state.LAST_TEXT_FILE = tmp / "last.txt"
+        state.PID_FILE = tmp / "player.pid"
         self.spoken = []
         readout.speak_text = lambda text, config: self.spoken.append(text)
 
     def tearDown(self):
-        toggle.CONFIG_PATH, toggle.LAST_TEXT_FILE, player.PID_FILE, readout.speak_text = self._saved
+        state.CONFIG_PATH, state.LEGACY_CONFIG_PATH, state.LAST_TEXT_FILE, state.PID_FILE, readout.speak_text = self._saved
         self._tmp.cleanup()
 
     def test_direct_mode_cleans_markdown(self):
@@ -168,7 +177,7 @@ Would you like me to walk you through Method 1?
 
     def test_toggle_actions_write_to_isolated_config(self):
         execute_toggle_action(["mode", "direct"])
-        saved = json.loads(toggle.CONFIG_PATH.read_text())
+        saved = json.loads(state.CONFIG_PATH.read_text())
         self.assertEqual(saved["mode"], "direct")
 
     def test_normalize_rate(self):
@@ -209,7 +218,7 @@ Would you like me to walk you through Method 1?
 
     def test_replay_reads_the_last_text_again(self):
         self.assertEqual(execute_toggle_action(["replay"]), "Nothing to replay yet.")
-        toggle.LAST_TEXT_FILE.write_text("Run: npm test.", encoding="utf-8")
+        state.LAST_TEXT_FILE.write_text("Run: npm test.", encoding="utf-8")
         self.assertEqual(execute_toggle_action(["replay"]), "🔁 Replaying the last readout.")
         self.assertEqual(self.spoken, ["Run: npm test."])
 
@@ -228,6 +237,47 @@ Would you like me to walk you through Method 1?
             user_input, response = read_current_turn(hook_input)
             self.assertIn("/readout stop", user_input)
             self.assertEqual(response, "Stopped the current readout.")
+
+    def test_legacy_agy_config_is_still_honoured(self):
+        state.LEGACY_CONFIG_PATH.write_text(json.dumps({"enabled": False, "voice": "en-US-EmmaNeural"}))
+        self.assertFalse(state.load_config()["enabled"])
+        execute_toggle_action(["on"])  # saving moves the settings to the new location
+        saved = json.loads(state.CONFIG_PATH.read_text())
+        self.assertEqual((saved["enabled"], saved["voice"]), (True, "en-US-EmmaNeural"))
+
+    def test_claude_code_and_codex_stop_hooks_use_last_assistant_message(self):
+        claude = {"hook_event_name": "Stop", "stop_hook_active": False, "transcript_path": "/x.jsonl",
+                  "last_assistant_message": "Done. Run `npm test`."}
+        codex = dict(claude, turn_id="t1", model="gpt-5")
+        for payload in (claude, codex):
+            self.assertEqual(turn_from_event(payload), ("", "Done. Run `npm test`."))
+        self.assertEqual(turn_from_event({"hook_event_name": "Stop", "last_assistant_message": None}), ("", ""))
+
+    def test_codex_notify_payload_arrives_as_the_last_argument(self):
+        payload = {"type": "agent-turn-complete", "turn-id": "1", "input-messages": ["fix the build"],
+                   "last-assistant-message": "Fixed it."}
+        event = read_event(["readout.py", json.dumps(payload)], io.StringIO(""))
+        self.assertEqual(turn_from_event(event), ("fix the build", "Fixed it."))
+
+    def test_stop_hook_payload_is_read_from_stdin(self):
+        stdin = io.StringIO(json.dumps({"hook_event_name": "Stop", "last_assistant_message": "Hi."}))
+        self.assertEqual(read_event(["readout.py"], stdin)["last_assistant_message"], "Hi.")
+        self.assertEqual(read_event(["readout.py"], io.StringIO("not json")), {})
+
+    def test_claude_code_readout_command_is_handled_without_a_model_turn(self):
+        payload = {"hook_event_name": "UserPromptExpansion", "expansion_type": "slash_command",
+                   "command_name": "voice-readout:readout", "command_args": "mode direct",
+                   "command_source": "plugin", "prompt": "/voice-readout:readout mode direct"}
+        output = pre_hook.handle_claude_expansion(payload, 0)
+        self.assertEqual(output["decision"], "block")
+        self.assertIn("DIRECT", output["reason"])
+        self.assertEqual(state.load_config()["mode"], "direct")
+
+    def test_claude_code_other_commands_and_unknown_actions_pass_through(self):
+        other = {"hook_event_name": "UserPromptExpansion", "command_name": "review", "command_args": "stop"}
+        self.assertIsNone(pre_hook.handle_claude_expansion(other, 0))
+        unknown = {"hook_event_name": "UserPromptExpansion", "command_name": "readout", "command_args": "louder"}
+        self.assertIsNone(pre_hook.handle_claude_expansion(unknown, 0))
 
 
 if __name__ == "__main__":

@@ -15,9 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-STATE_DIR = Path.home() / ".gemini" / "antigravity-cli"
-PID_FILE = STATE_DIR / "voice_readout_player.pid"
-LAST_TEXT_FILE = STATE_DIR / "voice_readout_last.txt"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import state
 
 VOICE_ALIASES = {
     "siri": "en-US-AvaNeural",
@@ -61,11 +60,11 @@ def _is_player_process(pid: int) -> bool:
 
 def stop_playback() -> bool:
     """Cancel any ongoing speech playback. Returns True if something was playing."""
-    if not PID_FILE.exists():
+    if not state.PID_FILE.exists():
         return False
     stopped = False
     try:
-        with open(PID_FILE, "r") as f:
+        with open(state.PID_FILE, "r") as f:
             old_pid = int(f.read().strip())
         if old_pid != os.getpid() and _is_player_process(old_pid):
             try:
@@ -82,25 +81,25 @@ def stop_playback() -> bool:
         pass
     finally:
         try:
-            PID_FILE.unlink(missing_ok=True)
+            state.PID_FILE.unlink(missing_ok=True)
         except Exception:
             pass
     return stopped
 
 
 def save_current_pid():
-    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(PID_FILE, "w") as f:
+    state.PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(state.PID_FILE, "w") as f:
         f.write(str(os.getpid()))
 
 
 def release_pid_file():
     """Remove the PID file only if it is still ours; a newer player may have replaced it."""
     try:
-        with open(PID_FILE, "r") as f:
+        with open(state.PID_FILE, "r") as f:
             if int(f.read().strip()) != os.getpid():
                 return
-        PID_FILE.unlink(missing_ok=True)
+        state.PID_FILE.unlink(missing_ok=True)
     except Exception:
         pass
 
@@ -108,8 +107,8 @@ def release_pid_file():
 def save_last_text(text: str):
     """Remember what was read so `readout replay` can say it again."""
     try:
-        LAST_TEXT_FILE.parent.mkdir(parents=True, exist_ok=True)
-        LAST_TEXT_FILE.write_text(text, encoding="utf-8")
+        state.LAST_TEXT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        state.LAST_TEXT_FILE.write_text(text, encoding="utf-8")
     except Exception:
         pass
 

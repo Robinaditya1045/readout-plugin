@@ -1,0 +1,4 @@
+#!/bin/sh
+# The `readout` control command. Claude Code puts a plugin's bin/ on the Bash tool's PATH;
+# install.sh links the same command into ~/.local/bin for agy, Codex and your shell.
+exec python3 "$(dirname "$0")/../scripts/toggle.py" "$@"
