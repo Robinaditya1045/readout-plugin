@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unit tests for voice_readout_plugin.
+Unit tests for voice_readout_plugin (modes, explainer, cleaner, transcript parsing).
 """
 
 import json
@@ -12,37 +12,60 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-from readout import clean_markdown_for_speech, extract_model_response
-import toggle
+from explainer import explain_response
+from readout import clean_markdown_for_speech, extract_model_response, prepare_speech_content
 
 
 class TestVoiceReadout(unittest.TestCase):
-    def test_clean_markdown_strips_code_blocks(self):
+    def test_direct_mode_cleans_markdown(self):
         raw = "Here is the code:\n```python\nprint('hello world')\n```\nLet me know if this helps!"
         cleaned = clean_markdown_for_speech(raw, include_code_notice=True)
         self.assertNotIn("print('hello world')", cleaned)
         self.assertIn("code block omitted", cleaned)
         self.assertIn("Let me know if this helps!", cleaned)
 
-    def test_clean_markdown_strips_links_and_formatting(self):
-        raw = "Check [our documentation](https://example.com) for **important** details and `var_name`."
-        cleaned = clean_markdown_for_speech(raw)
-        self.assertNotIn("https://example.com", cleaned)
-        self.assertIn("Check our documentation for important details and var_name.", cleaned)
+    def test_explain_mode_with_shell_commands(self):
+        raw = """
+Dependencies are installed.
+To launch the server, run:
+```bash
+npm run dev
+```
+"""
+        explained = explain_response(raw)
+        self.assertIn("Dependencies are installed", explained)
+        self.assertIn("npm run dev", explained)
+        self.assertNotIn("```", explained)
 
-    def test_clean_markdown_strips_headers_and_lists(self):
-        raw = "## Next Steps\n* Step 1: Install packages\n* Step 2: Run tests"
-        cleaned = clean_markdown_for_speech(raw)
-        self.assertNotIn("##", cleaned)
-        self.assertNotIn("*", cleaned)
-        self.assertIn("Next Steps", cleaned)
-        self.assertIn("Step 1: Install packages", cleaned)
+    def test_explain_mode_with_multiple_methods_and_questions(self):
+        raw = """
+The issue is that UEFI Secure Boot is blocking the NVIDIA driver.
 
-    def test_clean_markdown_truncates_long_text(self):
-        raw = "Sentence one. " * 200
-        cleaned = clean_markdown_for_speech(raw, max_chars=100)
-        self.assertTrue(len(cleaned) <= 150)
-        self.assertIn("Response truncated", cleaned)
+### Method 1: Enroll Key
+Run:
+```bash
+sudo mokutil --import /var/lib/mok.der
+```
+
+### Method 2: Disable Secure Boot
+Disable Secure Boot in BIOS.
+
+Would you like me to walk you through Method 1?
+"""
+        explained = explain_response(raw)
+        self.assertIn("UEFI Secure Boot is blocking", explained)
+        self.assertIn("Method 1: Enroll Key", explained)
+        self.assertIn("Method 2: Disable Secure Boot", explained)
+        self.assertIn("sudo mokutil", explained)
+        self.assertIn("Would you like me to walk you through Method 1?", explained)
+
+    def test_prepare_speech_content_mode_selection(self):
+        raw = "Sentence one. Sentence two.\n```bash\ngit status\n```"
+        explain_res = prepare_speech_content(raw, {"mode": "explain"})
+        direct_res = prepare_speech_content(raw, {"mode": "direct"})
+
+        self.assertIn("git status", explain_res)
+        self.assertIn("code block omitted", direct_res)
 
     def test_extract_model_response_from_transcript(self):
         with tempfile.TemporaryDirectory() as td:

@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
 voice-readout hook script for Google Antigravity CLI (agy).
-Executed automatically on the 'Stop' lifecycle event to read out the model's
-response as natural spoken audio using high-definition neural voices (Siri/Google Assistant style).
+Executed automatically on the 'Stop' lifecycle event.
+
+Supports two reading modes:
+1. 'direct'  : Reads the full model response directly (with markdown cleaned).
+2. 'explain' : Intelligently summarizes and explains the response on the go,
+               highlighting key takeaways, options, and commands naturally.
 """
 
 import json
@@ -13,13 +17,20 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Add scripts directory to path
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR))
+
+from explainer import explain_response
+
 CONFIG_PATH = Path.home() / ".gemini" / "antigravity-cli" / "voice_readout_config.json"
 
 DEFAULT_CONFIG = {
     "enabled": True,
-    "max_chars": 2000,
-    "voice": "en-US-AvaNeural",  # Natural assistant voice (Siri / Google Assistant quality)
+    "mode": "explain",  # "explain" (conversational brief) or "direct" (verbatim readout)
+    "voice": "en-US-AvaNeural",  # Natural assistant voice
     "speech_rate": "+0%",
+    "max_chars": 2000,
     "include_code_notice": True,
 }
 
@@ -37,51 +48,33 @@ def load_config() -> dict:
 
 
 def clean_markdown_for_speech(text: str, include_code_notice: bool = True, max_chars: int = 2000) -> str:
+    """Verbatim mode cleaner: strips markdown noise while preserving full text."""
     if not text:
         return ""
 
-    # Remove internal thinking tags if any appear in content
     text = re.sub(r"<thought>.*?</thought>", "", text, flags=re.DOTALL)
     text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL)
 
-    # Handle fenced code blocks
     code_notice = " code block omitted. " if include_code_notice else " "
     text = re.sub(r"```[\w-]*\n[\s\S]*?```", code_notice, text)
 
-    # Handle HTML tags
     text = re.sub(r"<[^>]+>", " ", text)
-
-    # Replace markdown links [text](url) with just text
     text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
-
-    # Remove image links ![alt](url)
     text = re.sub(r"!\[([^\]]*)\]\([^\)]+\)", "", text)
-
-    # Replace inline code `code` with code
     text = re.sub(r"`([^`]+)`", r"\1", text)
-
-    # Remove bold/italic markers
     text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
     text = re.sub(r"\*([^*]+)\*", r"\1", text)
     text = re.sub(r"__([^_]+)__", r"\1", text)
     text = re.sub(r"_([^_]+)_", r"\1", text)
-
-    # Remove markdown header hashes
     text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
-
-    # Remove blockquotes and list bullets
     text = re.sub(r"^[>\s*+-]+\s+", "", text, flags=re.MULTILINE)
     text = re.sub(r"^\d+\.\s+", "", text, flags=re.MULTILINE)
-
-    # Remove horizontal rules
     text = re.sub(r"^[ \t]*[-*_]{3,}[ \t]*$", "", text, flags=re.MULTILINE)
 
-    # Normalize whitespace
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{2,}", "\n", text)
     text = text.strip()
 
-    # Truncate if too long to prevent endless reading
     if max_chars and len(text) > max_chars:
         cut_text = text[:max_chars]
         last_punct = max(cut_text.rfind("."), cut_text.rfind("!"), cut_text.rfind("?"))
@@ -94,7 +87,7 @@ def clean_markdown_for_speech(text: str, include_code_notice: bool = True, max_c
 
 
 def extract_model_response(hook_input: dict) -> str:
-    # 1. Check direct environment variable if set
+    # 1. Environment variable fallback
     env_text = os.environ.get("ANTIGRAVITY_RESPONSE_TEXT")
     if env_text:
         return env_text
@@ -105,9 +98,6 @@ def extract_model_response(hook_input: dict) -> str:
         return ""
 
     transcript_path = Path(transcript_path_str)
-
-    # If transcriptPath points to transcript.jsonl or transcript_full.jsonl,
-    # prefer transcript_full.jsonl if present in the same directory
     full_path = transcript_path.parent / "transcript_full.jsonl"
     target_path = full_path if full_path.exists() else transcript_path
 
@@ -151,8 +141,7 @@ def speak_text(text: str, config: dict) -> None:
             f.write(text)
             txt_path = f.name
 
-        script_dir = Path(__file__).resolve().parent
-        player_script = script_dir / "player.py"
+        player_script = SCRIPT_DIR / "player.py"
 
         cmd = [
             sys.executable,
@@ -165,7 +154,7 @@ def speak_text(text: str, config: dict) -> None:
             txt_path,
         ]
 
-        # Spawn player in a detached process session so agent loop is completely non-blocking
+        # Spawn detached player process
         subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
@@ -174,6 +163,20 @@ def speak_text(text: str, config: dict) -> None:
         )
     except Exception:
         pass
+
+
+def prepare_speech_content(response_text: str, config: dict) -> str:
+    mode = config.get("mode", "explain").lower()
+
+    if mode in ("explain", "brief", "summary", "companion"):
+        return explain_response(response_text, config)
+    else:
+        # "direct" / "verbatim"
+        return clean_markdown_for_speech(
+            response_text,
+            include_code_notice=config.get("include_code_notice", True),
+            max_chars=config.get("max_chars", 2000),
+        )
 
 
 def main():
@@ -194,13 +197,9 @@ def main():
             err = hook_input.get("error")
             if not err:
                 response_text = extract_model_response(hook_input)
-                cleaned = clean_markdown_for_speech(
-                    response_text,
-                    include_code_notice=config.get("include_code_notice", True),
-                    max_chars=config.get("max_chars", 2000),
-                )
-                if cleaned:
-                    speak_text(cleaned, config)
+                spoken_content = prepare_speech_content(response_text, config)
+                if spoken_content:
+                    speak_text(spoken_content, config)
 
     except Exception:
         pass
