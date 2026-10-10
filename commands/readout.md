@@ -16,8 +16,14 @@ Use `/readout` to control spoken audio in Antigravity:
 - Toggle readout on:
   `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py on`
 
-- Toggle readout off:
+- Toggle readout off (also stops current speech):
   `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py off`
+
+- Stop the current speech (readout stays on):
+  `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py stop`
+
+- Replay the last readout:
+  `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py replay`
 
 - Switch neural voice:
   `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py voice <siri|andrew|emma|brian|google|ava>`

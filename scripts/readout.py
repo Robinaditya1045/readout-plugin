@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Tuple
 
 # Add scripts directory to path
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -23,6 +24,8 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from explainer import explain_response
 from markdown_speech import parse_markdown, render_full, strip_thinking
+from pre_hook import parse_readout_command
+from toggle import AUDIO_ACTIONS
 
 CONFIG_PATH = Path.home() / ".gemini" / "antigravity-cli" / "voice_readout_config.json"
 
@@ -77,24 +80,26 @@ def content_text(content) -> str:
     return ""
 
 
-def extract_model_response(hook_input: dict) -> str:
+def read_current_turn(hook_input: dict) -> Tuple[str, str]:
+    """Returns (user request, final model response) for the turn that just ended."""
     # 1. Environment variable fallback
     env_text = os.environ.get("ANTIGRAVITY_RESPONSE_TEXT")
     if env_text:
-        return env_text
+        return "", env_text
 
     # 2. Extract from transcriptPath passed in hook JSON
     transcript_path_str = hook_input.get("transcriptPath")
     if not transcript_path_str:
-        return ""
+        return "", ""
 
     transcript_path = Path(transcript_path_str)
     full_path = transcript_path.parent / "transcript_full.jsonl"
     target_path = full_path if full_path.exists() else transcript_path
 
     if not target_path.exists():
-        return ""
+        return "", ""
 
+    response = ""
     try:
         with open(target_path, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
@@ -111,15 +116,26 @@ def extract_model_response(hook_input: dict) -> str:
             # Stop at the turn boundary so a turn without a final message never
             # re-reads the previous turn's answer.
             if step.get("type") == "USER_INPUT":
-                break
-            if step.get("source") == "MODEL" and step.get("type") == "PLANNER_RESPONSE":
+                return content_text(step.get("content")), response
+            if not response and step.get("source") == "MODEL" and step.get("type") == "PLANNER_RESPONSE":
                 content = content_text(step.get("content"))
                 if content.strip():
-                    return content
+                    response = content
     except Exception:
         pass
 
-    return ""
+    return "", response
+
+
+def extract_model_response(hook_input: dict) -> str:
+    return read_current_turn(hook_input)[1]
+
+
+def is_audio_command(user_input: str) -> bool:
+    """`/readout stop|replay|test` handle audio themselves; reading the model's
+    confirmation afterwards would cut off (or undo) what they just did."""
+    args = parse_readout_command(user_input or "")
+    return bool(args) and args[0].lower() in AUDIO_ACTIONS
 
 
 def normalize_rate(rate) -> str:
@@ -198,8 +214,8 @@ def main():
 
         if config.get("enabled", True):
             err = hook_input.get("error")
-            if not err:
-                response_text = extract_model_response(hook_input)
+            user_input, response_text = read_current_turn(hook_input)
+            if not err and not is_audio_command(user_input):
                 spoken_content = prepare_speech_content(response_text, config)
                 if spoken_content:
                     speak_text(spoken_content, config)

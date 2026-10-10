@@ -58,10 +58,20 @@ def execute_toggle_action(args):
         toggle.save_config(config)
         return "🔊 Voice readout ENABLED. Model responses will be spoken aloud."
 
-    elif action in ("off", "disable", "stop"):
+    elif action in toggle.OFF_ACTIONS:
         config["enabled"] = False
         toggle.save_config(config)
+        toggle.stop_playback()
         return "🔇 Voice readout DISABLED. Responses will remain silent."
+
+    elif action in toggle.STOP_ACTIONS:
+        return toggle.stop_speech()
+
+    elif action in toggle.REPLAY_ACTIONS:
+        return toggle.replay_last(config)
+
+    elif action == "test":
+        return toggle.speak_test(config)
 
     elif action == "mode":
         if len(args) > 1:

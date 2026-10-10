@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """
 voice-readout audio player.
-Handles neural synthesis (edge-tts / gTTS) and non-blocking playback,
-with automatic fallback to system TTS if offline.
+Streams neural speech (edge-tts / gTTS) into an audio player as it is synthesized,
+so playback starts after the first chunk instead of after the whole response.
+Falls back to system TTS if offline.
 """
 
 import argparse
 import asyncio
 import os
+import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
-PID_FILE = Path.home() / ".gemini" / "antigravity-cli" / "voice_readout_player.pid"
+STATE_DIR = Path.home() / ".gemini" / "antigravity-cli"
+PID_FILE = STATE_DIR / "voice_readout_player.pid"
+LAST_TEXT_FILE = STATE_DIR / "voice_readout_last.txt"
 
 VOICE_ALIASES = {
     "siri": "en-US-AvaNeural",
@@ -28,6 +31,15 @@ VOICE_ALIASES = {
     "guy": "en-US-GuyNeural",
     "google": "gtts",
 }
+
+# Each player reads an MP3 stream from stdin and exits when it ends.
+STREAM_COMMANDS = {
+    "ffplay": ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-i", "pipe:0"],
+    "mpv": ["mpv", "--no-video", "--really-quiet", "-"],
+    "cvlc": ["cvlc", "--play-and-exit", "--quiet", "-"],
+}
+
+_system_tts_running = False
 
 
 def _is_player_process(pid: int) -> bool:
@@ -47,10 +59,11 @@ def _is_player_process(pid: int) -> bool:
         return False
 
 
-def kill_previous_playback():
-    """Cancel any ongoing speech playback to prevent overlapping voices."""
+def stop_playback() -> bool:
+    """Cancel any ongoing speech playback. Returns True if something was playing."""
     if not PID_FILE.exists():
-        return
+        return False
+    stopped = False
     try:
         with open(PID_FILE, "r") as f:
             old_pid = int(f.read().strip())
@@ -62,6 +75,7 @@ def kill_previous_playback():
                     os.killpg(old_pid, signal.SIGTERM)
                 else:
                     os.kill(old_pid, signal.SIGTERM)
+                stopped = True
             except (ProcessLookupError, PermissionError):
                 pass
     except Exception:
@@ -71,6 +85,7 @@ def kill_previous_playback():
             PID_FILE.unlink(missing_ok=True)
         except Exception:
             pass
+    return stopped
 
 
 def save_current_pid():
@@ -90,61 +105,114 @@ def release_pid_file():
         pass
 
 
+def save_last_text(text: str):
+    """Remember what was read so `readout replay` can say it again."""
+    try:
+        LAST_TEXT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LAST_TEXT_FILE.write_text(text, encoding="utf-8")
+    except Exception:
+        pass
+
+
 def find_audio_player():
     """Find an available CLI audio player."""
-    for player in ["ffplay", "mpv", "cvlc"]:
-        if subprocess.run(["which", player], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+    for player in STREAM_COMMANDS:
+        if shutil.which(player):
             return player
     return None
 
 
-async def synthesize_edge_tts(text: str, voice: str, output_path: str, rate_str: str = "+0%") -> bool:
-    try:
-        import edge_tts
+class PlayerPipe:
+    """Feeds MP3 bytes to an audio player's stdin, starting it on the first chunk."""
 
-        resolved_voice = VOICE_ALIASES.get(voice.lower(), voice)
-        communicate = edge_tts.Communicate(text, resolved_voice, rate=rate_str)
-        await communicate.save(output_path)
-        return os.path.exists(output_path) and os.path.getsize(output_path) > 0
-    except Exception:
-        return False
+    def __init__(self, player: str):
+        self.command = STREAM_COMMANDS[player]
+        self.proc = None
+
+    @property
+    def started(self) -> bool:
+        return self.proc is not None
+
+    def write(self, data: bytes):
+        if self.proc is None:
+            self.proc = subprocess.Popen(
+                self.command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        self.proc.stdin.write(data)
+        self.proc.stdin.flush()
+
+    def finish(self):
+        """Close the stream and wait for the player to finish speaking it."""
+        if self.proc is None:
+            return
+        try:
+            self.proc.stdin.close()
+        except Exception:
+            pass
+        self.proc.wait()
 
 
-def synthesize_gtts(text: str, output_path: str) -> bool:
-    try:
-        from gtts import gTTS
+async def stream_edge_tts(text: str, voice: str, rate: str, pipe: PlayerPipe):
+    import edge_tts
 
-        tts = gTTS(text=text, lang="en")
-        tts.save(output_path)
-        return os.path.exists(output_path) and os.path.getsize(output_path) > 0
-    except Exception:
-        return False
+    resolved_voice = VOICE_ALIASES.get(voice.lower(), voice)
+    async for chunk in edge_tts.Communicate(text, resolved_voice, rate=rate).stream():
+        if chunk["type"] == "audio":
+            pipe.write(chunk["data"])
+
+
+def stream_gtts(text: str, pipe: PlayerPipe):
+    from gtts import gTTS
+
+    for data in gTTS(text=text, lang="en").stream():
+        pipe.write(data)
 
 
 def fallback_system_tts(text: str):
     """Fallback to system TTS (spd-say on Linux, say on macOS, powershell on Windows)."""
+    global _system_tts_running
+    _system_tts_running = True
     platform = sys.platform
     if platform.startswith("linux"):
-        subprocess.run(["spd-say", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # -w keeps spd-say (and so this player) alive until speech ends, so it can be stopped.
+        subprocess.run(["spd-say", "-w", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     elif platform == "darwin":
         subprocess.run(["say", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     elif platform in ("win32", "cygwin"):
         escaped = text.replace("'", "''")
         ps_code = f"Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('{escaped}')"
         subprocess.run(["powershell", "-NoProfile", "-Command", ps_code], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _system_tts_running = False
 
 
-def play_audio_file(player: str, file_path: str):
-    if player == "ffplay":
-        cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", file_path]
-    elif player == "mpv":
-        cmd = ["mpv", "--no-video", "--really-quiet", file_path]
-    elif player == "cvlc":
-        cmd = ["cvlc", "--play-and-exit", "--quiet", file_path]
-    else:
-        return
+def _on_sigterm(*_):
+    if _system_tts_running and sys.platform.startswith("linux"):
+        # speech-dispatcher keeps talking after its client dies; cancel it explicitly.
+        subprocess.run(["spd-say", "-C"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    sys.exit(0)  # exit through SystemExit so cleanup in finally blocks still runs
 
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def speak(text: str, voice: str, rate: str) -> bool:
+    """Streams neural speech to an audio player. Returns False if nothing could be played."""
+    player = find_audio_player()
+    if not player:
+        return False
+    pipe = PlayerPipe(player)
+    try:
+        if voice.lower() != "google":
+            try:
+                asyncio.run(stream_edge_tts(text, voice, rate, pipe))
+            except Exception:
+                pass
+        # Only fall back to gTTS if edge-tts produced nothing; otherwise we'd repeat ourselves.
+        if not pipe.started:
+            try:
+                stream_gtts(text, pipe)
+            except Exception:
+                pass
+    finally:
+        pipe.finish()
+    return pipe.started
 
 
 def main():
@@ -154,9 +222,8 @@ def main():
     parser.add_argument("--file", help="Path to text file containing speech content")
     args = parser.parse_args()
 
-    # Exit through SystemExit when a newer player cancels us, so cleanup still runs.
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    kill_previous_playback()
+    signal.signal(signal.SIGTERM, _on_sigterm)
+    stop_playback()
     save_current_pid()
 
     text = ""
@@ -170,43 +237,13 @@ def main():
     else:
         text = sys.stdin.read().strip()
 
-    if not text:
+    try:
+        if text:
+            save_last_text(text)
+            if not speak(text, args.voice, args.rate):
+                fallback_system_tts(text)
+    finally:
         release_pid_file()
-        return
-
-    player = find_audio_player()
-    played = False
-
-    if player:
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
-            mp3_path = f.name
-
-        try:
-            # 1. Try edge-tts neural voice (unless explicitly set to google)
-            if args.voice.lower() != "google":
-                success = asyncio.run(synthesize_edge_tts(text, args.voice, mp3_path, args.rate))
-                if success:
-                    play_audio_file(player, mp3_path)
-                    played = True
-
-            # 2. Try gTTS (Google voice)
-            if not played:
-                success = synthesize_gtts(text, mp3_path)
-                if success:
-                    play_audio_file(player, mp3_path)
-                    played = True
-        finally:
-            if os.path.exists(mp3_path):
-                try:
-                    os.remove(mp3_path)
-                except Exception:
-                    pass
-
-    # 3. Fallback to offline system TTS if neural audio failed
-    if not played:
-        fallback_system_tts(text)
-
-    release_pid_file()
 
 
 if __name__ == "__main__":

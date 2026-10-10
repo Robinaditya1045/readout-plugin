@@ -12,21 +12,35 @@ from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
+import player
+import readout
 import toggle
 from explainer import explain_response
-from readout import clean_markdown_for_speech, extract_model_response, normalize_rate, prepare_speech_content
+from readout import (
+    clean_markdown_for_speech,
+    extract_model_response,
+    is_audio_command,
+    normalize_rate,
+    prepare_speech_content,
+    read_current_turn,
+)
 from pre_hook import parse_readout_command, execute_toggle_action
 
 
 class TestVoiceReadout(unittest.TestCase):
     def setUp(self):
-        # Never touch the real ~/.gemini config: toggle actions write to a temp file instead.
+        # Never touch the real ~/.gemini state: config, PID and last-text files live in a temp dir.
         self._tmp = tempfile.TemporaryDirectory()
-        self._real_config_path = toggle.CONFIG_PATH
-        toggle.CONFIG_PATH = Path(self._tmp.name) / "voice_readout_config.json"
+        tmp = Path(self._tmp.name)
+        self._saved = (toggle.CONFIG_PATH, toggle.LAST_TEXT_FILE, player.PID_FILE, readout.speak_text)
+        toggle.CONFIG_PATH = tmp / "voice_readout_config.json"
+        toggle.LAST_TEXT_FILE = tmp / "voice_readout_last.txt"
+        player.PID_FILE = tmp / "voice_readout_player.pid"
+        self.spoken = []
+        readout.speak_text = lambda text, config: self.spoken.append(text)
 
     def tearDown(self):
-        toggle.CONFIG_PATH = self._real_config_path
+        toggle.CONFIG_PATH, toggle.LAST_TEXT_FILE, player.PID_FILE, readout.speak_text = self._saved
         self._tmp.cleanup()
 
     def test_direct_mode_cleans_markdown(self):
@@ -177,6 +191,43 @@ Would you like me to walk you through Method 1?
         self.assertIn("Mode: explain", cleaned)
         for leaked in ("secret_code", "more_hidden", "unclosed_fence_command", "```", "|"):
             self.assertNotIn(leaked, cleaned)
+
+    def test_stop_stops_speech_without_disabling_readout(self):
+        self.assertEqual(execute_toggle_action(["stop"]), "Nothing is being read out right now.")
+        self.assertTrue(toggle.load_config()["enabled"])
+
+    def test_off_also_stops_current_speech(self):
+        calls = []
+        real_stop = toggle.stop_playback
+        toggle.stop_playback = lambda: calls.append("stop")
+        try:
+            self.assertIn("DISABLED", execute_toggle_action(["off"]))
+        finally:
+            toggle.stop_playback = real_stop
+        self.assertEqual(calls, ["stop"])
+        self.assertFalse(toggle.load_config()["enabled"])
+
+    def test_replay_reads_the_last_text_again(self):
+        self.assertEqual(execute_toggle_action(["replay"]), "Nothing to replay yet.")
+        toggle.LAST_TEXT_FILE.write_text("Run: npm test.", encoding="utf-8")
+        self.assertEqual(execute_toggle_action(["replay"]), "🔁 Replaying the last readout.")
+        self.assertEqual(self.spoken, ["Run: npm test."])
+
+    def test_stop_hook_stays_silent_after_audio_commands(self):
+        for request in ("/readout stop", "/readout replay", "/readout test", "/voice-readout:readout skip"):
+            self.assertTrue(is_audio_command(f"<USER_REQUEST>\n{request}\n</USER_REQUEST>"), request)
+        for request in ("/readout mode direct", "/readout on", "please stop the server", ""):
+            self.assertFalse(is_audio_command(f"<USER_REQUEST>\n{request}\n</USER_REQUEST>"), request)
+
+    def test_read_current_turn_returns_the_request_too(self):
+        with tempfile.TemporaryDirectory() as td:
+            hook_input = self._write_transcript(td, [
+                {"source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "<USER_REQUEST>\n/readout stop\n</USER_REQUEST>"},
+                {"source": "MODEL", "type": "PLANNER_RESPONSE", "content": "Stopped the current readout."},
+            ])
+            user_input, response = read_current_turn(hook_input)
+            self.assertIn("/readout stop", user_input)
+            self.assertEqual(response, "Stopped the current readout.")
 
 
 if __name__ == "__main__":

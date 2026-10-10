@@ -27,9 +27,22 @@ Reads out the full text of the response word-for-word, stripping out markdown fo
 ## Audio & Voice Quality
 
 - 🎙️ **Studio Neural Voices**: Powered by Edge Neural TTS and Google TTS (`en-US-AvaNeural`, `en-US-AndrewNeural`, `en-US-EmmaNeural`, `gTTS`).
-- ⚡ **Non-Blocking Background Playback**: Synthesizes and plays audio asynchronously via `ffplay` without delaying or freezing the CLI.
-- 🛑 **Instant Cancellation**: Interrupts and cancels previous speech as soon as a new response turn completes.
+- ⚡ **Streaming, Non-Blocking Playback**: Audio is streamed into `ffplay` (or `mpv` / `cvlc`) while it is still being synthesized, so speech starts about a second after a turn ends instead of after the whole response has been generated. It runs in the background without freezing the CLI.
+- 🛑 **Instant Cancellation**: Interrupts previous speech as soon as a new response turn completes, or whenever you run `readout stop`.
+- 🔁 **Replay**: `readout replay` reads the last response again.
 - 🌐 **Offline Fallback**: Automatically falls back to system TTS (`spd-say` on Linux, `say` on macOS, PowerShell on Windows) if offline.
+
+---
+
+## Installation
+
+```bash
+git clone git@github.com:Robinaditya1045/readout-plugin.git
+cd readout-plugin
+./install.sh
+```
+
+`install.sh` copies the plugin into `~/.gemini/config/plugins/voice-readout`, links the `readout` command into `~/.local/bin`, and warns if anything needed for neural voices is missing (`edge-tts`, `gTTS`, and an audio player such as `ffplay`). agy runs that installed copy, so **re-run `./install.sh` after pulling or editing** the repo. Override the locations with `VOICE_READOUT_PLUGIN_DIR` and `VOICE_READOUT_BIN_DIR`.
 
 ---
 
@@ -37,6 +50,7 @@ Reads out the full text of the response word-for-word, stripping out markdown fo
 
 ```
 voice_readout_plugin/
+├── install.sh               # Installs/updates the plugin and the readout command
 ├── plugin.json              # Plugin manifest
 ├── hooks.json               # PreInvocation & Stop lifecycle hooks
 ├── commands/
@@ -53,7 +67,8 @@ voice_readout_plugin/
 │   └── toggle.py            # CLI toggle, mode switcher, and voice selector
 ├── tests/
 │   ├── test_readout.py      # Modes, transcript parsing, hooks
-│   └── test_explainer.py    # Explain-mode response shapes and command extraction
+│   ├── test_explainer.py    # Explain-mode response shapes and command extraction
+│   └── test_player.py       # Streaming playback and engine fallback
 └── README.md
 ```
 
@@ -67,8 +82,10 @@ You have multiple ways to toggle or configure voice readout:
 Installed to `~/.local/bin/readout`:
 - From terminal:
   ```bash
-  readout off              # Instant mute
+  readout off              # Instant mute (also stops current speech)
   readout on               # Instant unmute
+  readout stop             # Stop the current speech, keep readout on
+  readout replay           # Read the last response again
   readout mode explain     # Switch to explain mode
   readout mode direct      # Switch to direct mode
   readout voice siri       # Switch voice
@@ -76,12 +93,12 @@ Installed to `~/.local/bin/readout`:
   ```
 - Inside `agy` session: Prefix with `!` to execute immediately without calling the AI model:
   ```text
-  !readout off
-  !readout on
+  !readout stop
+  !readout replay
   ```
 
 ### 2. Slash Command (`/readout`) with PreInvocation Acceleration
-When using `/readout off` or `/readout on` in `agy`, the plugin's `PreInvocation` hook executes the configuration change instantly in <1ms and bypasses unnecessary tool-use planning, responding in a single quick turn.
+When using `/readout off`, `/readout stop`, `/readout replay` and the other `/readout` commands in `agy`, the plugin's `PreInvocation` hook executes the action instantly and bypasses unnecessary tool-use planning, responding in a single quick turn. The model's confirmation after `stop`, `replay` and `test` is not read aloud, so it never talks over (or cuts off) what you asked for.
 
 ---
 
