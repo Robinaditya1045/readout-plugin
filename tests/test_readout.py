@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unit tests for voice_readout_plugin (modes, explainer, cleaner, transcript parsing).
+Unit tests for voice_readout_plugin (modes, explainer, cleaner, transcript parsing, pre_hook).
 """
 
 import json
@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from explainer import explain_response
 from readout import clean_markdown_for_speech, extract_model_response, prepare_speech_content
+from pre_hook import parse_readout_command, execute_toggle_action
 
 
 class TestVoiceReadout(unittest.TestCase):
@@ -66,6 +67,17 @@ Would you like me to walk you through Method 1?
 
         self.assertIn("git status", explain_res)
         self.assertIn("code block omitted", direct_res)
+
+    def test_pre_hook_parser_and_execution(self):
+        args_off = parse_readout_command("/readout off")
+        self.assertEqual(args_off, ["off"])
+        msg = execute_toggle_action(args_off)
+        self.assertIn("DISABLED", msg)
+
+        args_on = parse_readout_command("/voice-readout:readout on")
+        self.assertEqual(args_on, ["on"])
+        msg2 = execute_toggle_action(args_on)
+        self.assertIn("ENABLED", msg2)
 
     def test_extract_model_response_from_transcript(self):
         with tempfile.TemporaryDirectory() as td:

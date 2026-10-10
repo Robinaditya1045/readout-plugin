@@ -35,11 +35,15 @@ Reads out the full text of the response word-for-word, stripping out markdown fo
 ```
 voice_readout_plugin/
 ├── plugin.json              # Plugin manifest
-├── hooks.json               # Stop lifecycle hook definition
+├── hooks.json               # PreInvocation & Stop lifecycle hooks
 ├── commands/
 │   └── readout.md           # Slash command definition (/readout)
+├── skills/
+│   └── readout/
+│       └── SKILL.md         # Fast zero-deliberation skill definition
 ├── scripts/
-│   ├── readout.py           # Hook entry point and mode router
+│   ├── readout.py           # Stop hook entry point and mode router
+│   ├── pre_hook.py          # PreInvocation hook for instant toggle handling
 │   ├── explainer.py         # Conversational summary and command extractor
 │   ├── player.py            # Neural TTS synthesis and audio playback
 │   └── toggle.py            # CLI toggle, mode switcher, and voice selector
@@ -50,31 +54,29 @@ voice_readout_plugin/
 
 ---
 
-## Switching Modes & Voices
+## Ultra-Fast Control (Zero Deliberation)
 
-### Switch Modes
-```bash
-python3 scripts/toggle.py mode explain   # Switch to conversational explain mode
-python3 scripts/toggle.py mode direct    # Switch to verbatim readout mode
-python3 scripts/toggle.py mode           # View mode info
-```
+You have multiple ways to toggle or configure voice readout:
 
-### Switch Voices
-```bash
-python3 scripts/toggle.py voice siri     # Female assistant (en-US-AvaNeural)
-python3 scripts/toggle.py voice andrew   # Male assistant (en-US-AndrewNeural)
-python3 scripts/toggle.py voice emma     # Warm female (en-US-EmmaNeural)
-python3 scripts/toggle.py voice brian    # Professional male (en-US-BrianNeural)
-python3 scripts/toggle.py voice google   # Google voice (gTTS)
-```
+### 1. Instant Shell Command (Fastest: < 50ms, Zero AI Thinking)
+Installed to `~/.local/bin/readout`:
+- From terminal:
+  ```bash
+  readout off              # Instant mute
+  readout on               # Instant unmute
+  readout mode explain     # Switch to explain mode
+  readout mode direct      # Switch to direct mode
+  readout voice siri       # Switch voice
+  readout status           # View status
+  ```
+- Inside `agy` session: Prefix with `!` to execute immediately without calling the AI model:
+  ```text
+  !readout off
+  !readout on
+  ```
 
-### Toggle Audio & Test
-```bash
-python3 scripts/toggle.py off            # Mute speech
-python3 scripts/toggle.py on             # Unmute speech
-python3 scripts/toggle.py status         # View current configuration
-python3 scripts/toggle.py test           # Play a sample in current mode
-```
+### 2. Slash Command (`/readout`) with PreInvocation Acceleration
+When using `/readout off` or `/readout on` in `agy`, the plugin's `PreInvocation` hook executes the configuration change instantly in <1ms and bypasses unnecessary tool-use planning, responding in a single quick turn.
 
 ---
 

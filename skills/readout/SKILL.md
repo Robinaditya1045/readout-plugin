@@ -1,31 +1,23 @@
 ---
 name: readout
-description: Control voice readout text-to-speech (toggle on/off, switch between explain and direct modes, change neural voices, test audio).
+description: Instantly toggle or configure voice readout text-to-speech without deliberation.
 ---
 
 # Voice Readout (`/readout`)
 
-Control spoken audio playback and AI companion voice explanations for Antigravity responses.
+> [!IMPORTANT]
+> **ZERO DELIBERATION RULE**:
+> If the hook already executed the action (see system notice), DO NOT call any tools. Output the confirmation directly.
+> Otherwise, immediately call `run_command` in Step 1 without multi-step planning or deliberation.
 
-## Actions
+## Direct Command Map
 
-- **Turn On Voice**:
-  Run: `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py on`
+- `/readout on` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py on`
+- `/readout off` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py off`
+- `/readout mode explain` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py mode explain`
+- `/readout mode direct` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py mode direct`
+- `/readout voice <name>` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py voice <name>`
+- `/readout status` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py status`
+- `/readout test` -> `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py test`
 
-- **Turn Off Voice**:
-  Run: `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py off`
-
-- **Switch to Conversational Explain Mode**:
-  Run: `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py mode explain`
-
-- **Switch to Verbatim Direct Mode**:
-  Run: `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py mode direct`
-
-- **Change Voice**:
-  Run: `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py voice <siri|andrew|emma|brian|google|ava>`
-
-- **Check Current Status**:
-  Run: `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py status`
-
-- **Test Audio**:
-  Run: `python3 ~/.gemini/config/plugins/voice-readout/scripts/toggle.py test`
+Return the single-line command result directly to the user.

@@ -1,5 +1,12 @@
 {
   "voice-readout": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "python3 scripts/pre_hook.py",
+        "timeout": 5
+      }
+    ],
     "Stop": [
       {
         "type": "command",
