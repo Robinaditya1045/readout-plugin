@@ -35,9 +35,14 @@ def log_event(message: str):
 
 
 def parse_readout_command(prompt: str):
-    """Detects if prompt is a /readout command and extracts arguments."""
-    prompt = prompt.strip()
-    match = re.search(r"(?:/readout|/voice-readout:readout)\s*(.*)", prompt, re.IGNORECASE)
+    """Detects if prompt is a /readout command and extracts arguments.
+
+    Only a request that starts with the command counts, so a prompt that merely
+    mentions /readout (or metadata appended after the request) never toggles anything.
+    """
+    request = re.search(r"<USER_REQUEST>(.*?)</USER_REQUEST>", prompt, re.DOTALL)
+    text = request.group(1) if request else re.sub(r"<[^>]+>", "", prompt)
+    match = re.match(r"\s*/(?:voice-readout:)?readout\b[ \t]*([^\n]*)", text, re.IGNORECASE)
     if not match:
         return None
     arg_str = match.group(1).strip()
@@ -101,8 +106,7 @@ def main():
     try:
         raw_input = sys.stdin.read()
         if not raw_input.strip():
-            sys.stdout.write(json.dumps(hook_output) + "\n")
-            return
+            return  # the finally block writes the (empty) hook output exactly once
 
         payload = json.loads(raw_input)
         transcript_path_str = payload.get("transcriptPath")
@@ -124,8 +128,8 @@ def main():
                 except Exception:
                     continue
 
-            clean_prompt = re.sub(r"<[^>]+>", "", latest_user_prompt).strip()
-            args = parse_readout_command(clean_prompt)
+            args = parse_readout_command(latest_user_prompt)
+            clean_prompt = re.sub(r"<[^>]+>", "", latest_user_prompt).strip().split("\n")[0]
 
             if args is not None:
                 result_msg = execute_toggle_action(args)
