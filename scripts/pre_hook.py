@@ -47,7 +47,7 @@ def parse_readout_command(prompt: str):
     return arg_str.split() if arg_str else []
 
 
-def execute_toggle_action(args):
+def execute_toggle_action(args, payload=None):
     action = args[0].lower() if args else "status"
     config = toggle.load_config()
 
@@ -67,6 +67,9 @@ def execute_toggle_action(args):
 
     elif action in toggle.REPLAY_ACTIONS:
         return toggle.replay_last(config)
+
+    elif action in toggle.LAST_ACTIONS:
+        return toggle.read_last(config, payload)
 
     elif action == "test":
         return toggle.speak_test(config)
@@ -133,7 +136,7 @@ def handle_agy(payload: dict, start_time: float) -> dict:
     clean_prompt = re.sub(r"<[^>]+>", "", latest_user_prompt).strip().split("\n")[0]
 
     if args is not None:
-        result_msg = execute_toggle_action(args)
+        result_msg = execute_toggle_action(args, payload)
         elapsed_ms = (time.time() - start_time) * 1000
         log_event(f"Intercepted '{clean_prompt}' -> Executed {args} in {elapsed_ms:.2f}ms -> Result: '{result_msg}'")
 
@@ -154,7 +157,7 @@ def handle_claude_expansion(payload: dict, start_time: float):
     if name != "readout":
         return None
     args = (payload.get("command_args") or "").split()
-    result_msg = execute_toggle_action(args)
+    result_msg = execute_toggle_action(args, payload)
     elapsed_ms = (time.time() - start_time) * 1000
     log_event(f"Claude Code /readout {' '.join(args)} -> {elapsed_ms:.2f}ms -> Result: '{result_msg}'")
     if not result_msg:

@@ -14,7 +14,8 @@ from pathlib import Path
 STATE_DIR = Path(os.environ.get("VOICE_READOUT_HOME") or Path.home() / ".config" / "voice-readout")
 CONFIG_PATH = STATE_DIR / "config.json"
 PID_FILE = STATE_DIR / "player.pid"
-LAST_TEXT_FILE = STATE_DIR / "last.txt"
+LAST_TEXT_FILE = STATE_DIR / "last.txt"  # the last text spoken, for `readout replay`
+LAST_RESPONSE_FILE = STATE_DIR / "last_response.md"  # the last raw response, even when readout is off
 LOG_FILE = STATE_DIR / "hook.log"
 
 # Versions before 2.0 kept the config under agy's own directory.

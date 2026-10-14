@@ -27,6 +27,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from explainer import explain_response
 from markdown_speech import parse_markdown, render_full, strip_thinking
 from pre_hook import parse_readout_command
+import state
 from state import load_config
 from toggle import AUDIO_ACTIONS
 
@@ -59,6 +60,39 @@ def content_text(content) -> str:
     return ""
 
 
+def read_jsonl_backwards(path: Path):
+    """Yields the JSON objects of a transcript file, last line first, skipping bad lines."""
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        lines = f.readlines()
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            yield json.loads(line)
+        except Exception:
+            continue
+
+
+def agy_transcript_path(hook_input: dict):
+    transcript_path_str = hook_input.get("transcriptPath")
+    if not transcript_path_str:
+        return None
+    transcript_path = Path(transcript_path_str)
+    full_path = transcript_path.parent / "transcript_full.jsonl"
+    target_path = full_path if full_path.exists() else transcript_path
+    return target_path if target_path.exists() else None
+
+
+def agy_response_text(step: dict) -> str:
+    """The text of a non-empty final-answer step, or ''."""
+    if step.get("source") == "MODEL" and step.get("type") == "PLANNER_RESPONSE":
+        content = content_text(step.get("content"))
+        if content.strip():
+            return content
+    return ""
+
+
 def read_current_turn(hook_input: dict) -> Tuple[str, str]:
     """Returns (user request, final model response) for the turn that just ended."""
     # 1. Environment variable fallback
@@ -67,43 +101,99 @@ def read_current_turn(hook_input: dict) -> Tuple[str, str]:
         return "", env_text
 
     # 2. Extract from transcriptPath passed in hook JSON
-    transcript_path_str = hook_input.get("transcriptPath")
-    if not transcript_path_str:
-        return "", ""
-
-    transcript_path = Path(transcript_path_str)
-    full_path = transcript_path.parent / "transcript_full.jsonl"
-    target_path = full_path if full_path.exists() else transcript_path
-
-    if not target_path.exists():
+    target_path = agy_transcript_path(hook_input)
+    if not target_path:
         return "", ""
 
     response = ""
     try:
-        with open(target_path, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-
-        for line in reversed(lines):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                step = json.loads(line)
-            except Exception:
-                continue
-
+        for step in read_jsonl_backwards(target_path):
             # Stop at the turn boundary so a turn without a final message never
             # re-reads the previous turn's answer.
             if step.get("type") == "USER_INPUT":
                 return content_text(step.get("content")), response
-            if not response and step.get("source") == "MODEL" and step.get("type") == "PLANNER_RESPONSE":
-                content = content_text(step.get("content"))
-                if content.strip():
-                    response = content
+            if not response:
+                response = agy_response_text(step)
     except Exception:
         pass
 
     return "", response
+
+
+def agy_previous_response(hook_input: dict) -> str:
+    """The last answer before the current (still running) turn of an agy transcript."""
+    target_path = agy_transcript_path(hook_input)
+    if not target_path:
+        return ""
+    seen_current_request = False
+    for step in read_jsonl_backwards(target_path):
+        if step.get("type") == "USER_INPUT":
+            seen_current_request = True
+        elif seen_current_request:
+            response = agy_response_text(step)
+            if response:
+                return response
+    return ""
+
+
+def claude_last_response(transcript_path: str) -> str:
+    """The final message of the last finished turn in a Claude Code transcript.
+
+    Claude Code writes one line per content block, so the text blocks that share
+    the last text block's message id are joined, like `last_assistant_message`.
+    """
+    path = Path(transcript_path)
+    if not path.exists():
+        return ""
+    message_id, parts = None, []
+    for entry in read_jsonl_backwards(path):
+        if entry.get("type") != "assistant" or entry.get("isSidechain"):
+            continue
+        message = entry.get("message") or {}
+        if message.get("model") == "<synthetic>":
+            continue
+        if message_id is not None and message.get("id") != message_id:
+            break
+        content = message.get("content")
+        texts = [b.get("text") or "" for b in content if isinstance(b, dict) and b.get("type") == "text"] \
+            if isinstance(content, list) else [content_text(content)]
+        texts = [t for t in texts if t.strip()]
+        if texts:
+            message_id = message.get("id") or object()  # no id: take just this entry
+            parts[:0] = texts
+    return "\n\n".join(parts)
+
+
+def previous_response(payload: dict) -> str:
+    """The response before the current turn, for `/readout last`.
+
+    Read from the conversation's own transcript when a hook supplies one; otherwise
+    (the `readout` CLI, Codex) the last response any agent finished.
+    """
+    response = ""
+    try:
+        if payload.get("transcript_path"):  # Claude Code
+            response = claude_last_response(payload["transcript_path"])
+        elif payload.get("transcriptPath"):  # agy
+            response = agy_previous_response(payload)
+    except Exception:
+        response = ""
+    if response.strip():
+        return response
+    try:
+        return state.LAST_RESPONSE_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def save_last_response(response: str) -> None:
+    if not response.strip():
+        return
+    try:
+        state.LAST_RESPONSE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        state.LAST_RESPONSE_FILE.write_text(response, encoding="utf-8")
+    except OSError:
+        pass
 
 
 def extract_model_response(hook_input: dict) -> str:
@@ -208,9 +298,10 @@ def main():
         payload = read_event(sys.argv, sys.stdin)
         config = load_config()
 
-        if config.get("enabled", True) and not payload.get("error"):
-            user_input, response_text = turn_from_event(payload)
-            if not is_audio_command(user_input):
+        user_input, response_text = turn_from_event(payload) if not payload.get("error") else ("", "")
+        if response_text and not is_audio_command(user_input):
+            save_last_response(response_text)  # for `readout last`, even while readout is off
+            if config.get("enabled", True):
                 spoken_content = prepare_speech_content(response_text, config)
                 if spoken_content:
                     speak_text(spoken_content, config)

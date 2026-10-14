@@ -9,6 +9,7 @@ Usage:
   python3 scripts/toggle.py status
   python3 scripts/toggle.py stop
   python3 scripts/toggle.py replay
+  python3 scripts/toggle.py last
   python3 scripts/toggle.py test
 """
 
@@ -24,8 +25,9 @@ from state import load_config, save_config
 OFF_ACTIONS = ("off", "disable", "mute")
 STOP_ACTIONS = ("stop", "skip", "hush", "shh")
 REPLAY_ACTIONS = ("replay", "repeat", "again")
+LAST_ACTIONS = ("last", "read")
 # Actions that start or stop audio themselves; their agy turn must not be read out afterwards.
-AUDIO_ACTIONS = STOP_ACTIONS + REPLAY_ACTIONS + ("test",)
+AUDIO_ACTIONS = STOP_ACTIONS + REPLAY_ACTIONS + LAST_ACTIONS + ("test",)
 
 TEST_MARKDOWN = """
 The configuration has been updated successfully.
@@ -54,6 +56,20 @@ def replay_last(config: dict) -> str:
 
     speak_text(text, config)
     return "🔁 Replaying the last readout."
+
+
+def read_last(config: dict, payload: dict = None) -> str:
+    """Reads the conversation's last response once. Never changes `enabled`, so
+    readout that is off stays off."""
+    from readout import prepare_speech_content, previous_response, speak_text
+
+    spoken = prepare_speech_content(previous_response(payload or {}), config)
+    if not spoken:
+        return "No response to read yet."
+    speak_text(spoken, config)
+    if config.get("enabled", True):
+        return "🔊 Reading the last response."
+    return "🔊 Reading the last response. Readout stays off for new responses."
 
 
 def speak_test(config: dict) -> str:
@@ -113,6 +129,9 @@ def main():
     elif action in REPLAY_ACTIONS:
         print(replay_last(config))
 
+    elif action in LAST_ACTIONS:
+        print(read_last(config))
+
     elif action == "mode":
         if len(args) > 1:
             target_mode = args[1].lower()
@@ -154,7 +173,7 @@ def main():
         print(speak_test(config))
 
     else:
-        print("Usage: readout [on|off|stop|replay|mode [explain|direct]|voice [name]|status|test]")
+        print("Usage: readout [on|off|stop|replay|last|mode [explain|direct]|voice [name]|status|test]")
         sys.exit(1)
 
 

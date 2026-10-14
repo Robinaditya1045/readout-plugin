@@ -20,7 +20,7 @@ To try your changes in an agent, re-run `./install.sh <agent>`. In Claude Code y
 - **Never break the agent.** Hook scripts must always exit 0 and print what their agent expects: `{}` from the Stop hook, `{"injectSteps": [...]}` from agy's PreInvocation hook, and nothing (or a block decision) for Claude Code's UserPromptExpansion. Wrap new logic so a failure means silence, not a broken turn.
 - **Return fast.** Hooks run on every turn. Anything slow, like speech synthesis, belongs in the detached `player.py`.
 - **Explainer changes need a test** in `tests/test_explainer.py`, built from the shape of a real agent response (with personal details removed).
-- **Keep shared logic in one place.** Markdown parsing and speech cleanup go in `markdown_speech.py`. Config and state paths go in `state.py`. Actions shared by `toggle.py` and `pre_hook.py` (stop, replay, test) are helpers in `toggle.py`.
+- **Keep shared logic in one place.** Markdown parsing and speech cleanup go in `markdown_speech.py`. Config and state paths go in `state.py`. Actions shared by `toggle.py` and `pre_hook.py` (stop, replay, last, test) are helpers in `toggle.py`.
 - **Keep `scripts/` flat.** Every script imports its siblings by putting `scripts/` on `sys.path`.
 - **Validate both manifests** before opening a PR: `claude plugin validate .` and `agy plugin validate .`.
 

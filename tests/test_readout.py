@@ -40,16 +40,19 @@ class TestVoiceReadout(unittest.TestCase):
         # Never touch the real ~/.gemini state: config, PID and last-text files live in a temp dir.
         self._tmp = tempfile.TemporaryDirectory()
         tmp = Path(self._tmp.name)
-        self._saved = (state.CONFIG_PATH, state.LEGACY_CONFIG_PATH, state.LAST_TEXT_FILE, state.PID_FILE, readout.speak_text)
+        self._saved = (state.CONFIG_PATH, state.LEGACY_CONFIG_PATH, state.LAST_TEXT_FILE, state.LAST_RESPONSE_FILE,
+                       state.PID_FILE, readout.speak_text)
         state.CONFIG_PATH = tmp / "config.json"
         state.LEGACY_CONFIG_PATH = tmp / "legacy_config.json"
         state.LAST_TEXT_FILE = tmp / "last.txt"
+        state.LAST_RESPONSE_FILE = tmp / "last_response.md"
         state.PID_FILE = tmp / "player.pid"
         self.spoken = []
         readout.speak_text = lambda text, config: self.spoken.append(text)
 
     def tearDown(self):
-        state.CONFIG_PATH, state.LEGACY_CONFIG_PATH, state.LAST_TEXT_FILE, state.PID_FILE, readout.speak_text = self._saved
+        (state.CONFIG_PATH, state.LEGACY_CONFIG_PATH, state.LAST_TEXT_FILE, state.LAST_RESPONSE_FILE,
+         state.PID_FILE, readout.speak_text) = self._saved
         self._tmp.cleanup()
 
     def test_direct_mode_cleans_markdown(self):
@@ -223,7 +226,8 @@ Would you like me to walk you through Method 1?
         self.assertEqual(self.spoken, ["Run: npm test."])
 
     def test_stop_hook_stays_silent_after_audio_commands(self):
-        for request in ("/readout stop", "/readout replay", "/readout test", "/voice-readout:readout skip"):
+        for request in ("/readout stop", "/readout replay", "/readout last", "/readout test",
+                        "/voice-readout:readout skip"):
             self.assertTrue(is_audio_command(f"<USER_REQUEST>\n{request}\n</USER_REQUEST>"), request)
         for request in ("/readout mode direct", "/readout on", "please stop the server", ""):
             self.assertFalse(is_audio_command(f"<USER_REQUEST>\n{request}\n</USER_REQUEST>"), request)
@@ -278,6 +282,59 @@ Would you like me to walk you through Method 1?
         self.assertIsNone(pre_hook.handle_claude_expansion(other, 0))
         unknown = {"hook_event_name": "UserPromptExpansion", "command_name": "readout", "command_args": "louder"}
         self.assertIsNone(pre_hook.handle_claude_expansion(unknown, 0))
+
+    def _run_stop_hook(self, payload):
+        stdout, real = io.StringIO(), (sys.argv, sys.stdin, sys.stdout)
+        sys.argv, sys.stdin, sys.stdout = ["readout.py"], io.StringIO(json.dumps(payload)), stdout
+        try:
+            readout.main()
+        finally:
+            sys.argv, sys.stdin, sys.stdout = real
+        return stdout.getvalue()
+
+    def test_last_reads_the_response_without_turning_readout_on(self):
+        execute_toggle_action(["off"])
+        self.assertEqual(execute_toggle_action(["last"]), "No response to read yet.")
+        self.assertEqual(self._run_stop_hook({"hook_event_name": "Stop", "last_assistant_message": "All tests pass."}),
+                         "{}\n")
+        self.assertEqual(self.spoken, [])  # readout is off, but the response is kept
+        self.assertIn("stays off", execute_toggle_action(["last"]))
+        self.assertEqual(self.spoken, ["All tests pass."])
+        self.assertFalse(state.load_config()["enabled"])
+
+    def test_last_in_claude_code_reads_this_conversations_final_message(self):
+        state.LAST_RESPONSE_FILE.write_text("Another session's answer.", encoding="utf-8")
+        lines = [
+            {"type": "user", "message": {"role": "user", "content": "fix it"}},
+            {"type": "assistant", "message": {"id": "m1", "content": [{"type": "text", "text": "Looking."}]}},
+            {"type": "assistant", "message": {"id": "m1", "content": [{"type": "tool_use", "name": "Bash"}]}},
+            {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result"}]}},
+            {"type": "assistant", "message": {"id": "m2", "content": [{"type": "thinking", "thinking": "x"}]}},
+            {"type": "assistant", "message": {"id": "m2", "content": [{"type": "text", "text": "Fixed the bug."}]}},
+            {"type": "assistant", "message": {"id": "m2", "content": [{"type": "text", "text": "Run npm test."}]}},
+            {"type": "assistant", "isSidechain": True, "message": {"id": "s", "content": [{"type": "text", "text": "Sub."}]}},
+            {"type": "assistant", "message": {"id": "x", "model": "<synthetic>", "content": [{"type": "text", "text": "No response requested."}]}},
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "session.jsonl"
+            path.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+            payload = {"hook_event_name": "UserPromptExpansion", "command_name": "voice-readout:readout",
+                       "command_args": "last", "transcript_path": str(path)}
+            output = pre_hook.handle_claude_expansion(payload, 0)
+        self.assertEqual(output["decision"], "block")
+        self.assertEqual(self.spoken, ["Fixed the bug. Run npm test."])
+
+    def test_last_in_agy_skips_the_current_request(self):
+        with tempfile.TemporaryDirectory() as td:
+            hook_input = self._write_transcript(td, [
+                {"source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "<USER_REQUEST>\nfix it\n</USER_REQUEST>"},
+                {"source": "MODEL", "type": "PLANNER_RESPONSE", "content": "Fixed the bug."},
+                {"source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "<USER_REQUEST>\n/readout last\n</USER_REQUEST>"},
+            ])
+            self.assertEqual(readout.previous_response(hook_input), "Fixed the bug.")
+            output = pre_hook.handle_agy(hook_input, 0)
+        self.assertIn("Reading the last response", output["injectSteps"][0]["ephemeralMessage"])
+        self.assertEqual(self.spoken, ["Fixed the bug."])
 
 
 if __name__ == "__main__":
