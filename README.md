@@ -10,7 +10,7 @@
 - 🧠 **Explains, doesn't just read:** you get the takeaway, the steps in order, the options, warnings, and the question the agent is asking you.
 - ⌨️ **Every command, spoken naturally:** `rm -rf node_modules && npm ci` becomes "rm -rf node_modules, and then npm ci".
 - ⚡ **Starts in about a second:** audio streams while it is being synthesized and plays in the background, so your terminal never waits.
-- 🎛️ **Instant control:** `/readout stop`, `replay`, `off`, `mode` and `voice` run without spending a model turn.
+- 🎛️ **Instant control:** `/readout stop`, `replay`, `last`, `off`, `mode` and `voice` run without spending a model turn.
 - 🔌 **One install, three agents:** a single config and a single player, shared by every agent you use.
 
 ---
@@ -179,7 +179,8 @@ Works from any terminal, and inside agy as `!readout …`:
 |---|---|
 | `readout on` / `readout off` | Turn readout on or off. `off` also stops any speech in progress |
 | `readout stop` | Stop the current speech; readout stays on |
-| `readout replay` | Read the last response again |
+| `readout replay` | Repeat the last readout |
+| `readout last` | Read this conversation's last response, even while readout is off. Readout stays off afterwards |
 | `readout mode explain` / `readout mode direct` | Conversational brief, or word-for-word |
 | `readout voice <name>` | Change the voice (see below) |
 | `readout status` | Show the current settings |
@@ -189,9 +190,9 @@ Works from any terminal, and inside agy as `!readout …`:
 
 - **agy:** `/readout stop`, `/readout replay`, `/readout mode direct`, …
 - **Claude Code:** `/voice-readout:readout stop`, and the same for every other action. These are handled by a hook in milliseconds and never reach the model.
-- **Codex:** run `readout …` in a shell.
+- **Codex:** run `readout …` in a shell. Here `readout last` reads the most recent response from any agent, because a shell command can't tell which conversation you mean.
 
-After `/readout stop`, `replay` or `test`, the agent's short confirmation is not read aloud, so it never talks over or cuts off what you asked for.
+After `/readout stop`, `replay`, `last` or `test`, the agent's short confirmation is not read aloud, so it never talks over or cuts off what you asked for.
 
 ### Voices
 

@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- `readout last` reads the conversation's last response on demand. It works while readout is off and leaves it off. In Claude Code and agy it reads the current conversation's transcript; from a shell (and in Codex) it reads the most recent response from any agent, which the Stop hook now keeps even while readout is off.
+
 ## [2.0.0] - 2026-10-11
 
 ### Added

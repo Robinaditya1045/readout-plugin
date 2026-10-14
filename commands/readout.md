@@ -9,7 +9,8 @@ Use `/readout` to control spoken audio. Run the matching command and return its 
 
 - `readout on` / `readout off` (off also stops current speech)
 - `readout stop`: stop the current speech, keep readout on
-- `readout replay`: read the last response again
+- `readout replay`: repeat the last readout
+- `readout last`: read the last response once, even while readout is off (it stays off)
 - `readout mode explain` / `readout mode direct`
 - `readout voice <siri|ava|emma|andrew|brian|aria|jenny|guy|google>`
 - `readout status`

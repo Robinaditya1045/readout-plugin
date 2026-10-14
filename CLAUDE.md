@@ -24,7 +24,7 @@ python3 -m unittest tests.test_explainer.TestCommands.test_every_command_in_one_
 claude plugin validate . && agy plugin validate .                     # both manifests
 ./install.sh [agy] [claude] [codex]                                   # install/update (default: every agent found)
 ./install.sh uninstall [agents]
-python3 scripts/toggle.py status|on|off|stop|replay|mode <explain|direct>|voice <name>|test
+python3 scripts/toggle.py status|on|off|stop|replay|last|mode <explain|direct>|voice <name>|test
 echo '{"hook_event_name": "Stop", "last_assistant_message": "Hi"}' | python3 scripts/readout.py   # simulate a Stop hook
 claude -p "/voice-readout:readout status" --plugin-dir . --output-format json   # live check: num_turns 0, cost 0
 ```
@@ -51,7 +51,7 @@ Every hook script swallows exceptions and must exit 0 with the output its agent 
 - `readout.py` prints `{}`. Codex's Stop hook *requires* JSON on stdout.
 - `pre_hook.py` prints `{"injectSteps": []}` for agy, and **nothing** for Claude Code unless it blocks.
 
-**State: `scripts/state.py`.** Config is at `~/.config/voice-readout/config.json` (or `$VOICE_READOUT_HOME`), alongside `player.pid`, `last.txt` and `hook.log`, shared by all agents. `load_config` falls back to the pre-2.0 agy path `~/.gemini/antigravity-cli/voice_readout_config.json` until the first save. Modules read `state.X` at call time, so patching `state` attributes works.
+**State: `scripts/state.py`.** Config is at `~/.config/voice-readout/config.json` (or `$VOICE_READOUT_HOME`), alongside `player.pid`, `last.txt`, `last_response.md` and `hook.log`, shared by all agents. `load_config` falls back to the pre-2.0 agy path `~/.gemini/antigravity-cli/voice_readout_config.json` until the first save. Modules read `state.X` at call time, so patching `state` attributes works.
 
 **Turn-complete hook: `scripts/readout.py`** (agy, Claude Code and Codex Stop hooks, and Codex `notify`)
 1. `read_event` reads the payload. Codex `notify` passes it as the **last argv** item; every hook passes it on stdin.
@@ -59,11 +59,12 @@ Every hook script swallows exceptions and must exit 0 with the output its agent 
    - Codex notify (`type == "agent-turn-complete"`): uses `last-assistant-message` and `input-messages`.
    - Claude Code and Codex hooks (`hook_event_name == "Stop"`): use `last_assistant_message`.
    - agy: `read_current_turn` walks the transcript backwards to the last non-empty `MODEL`/`PLANNER_RESPONSE` step. It stops at the turn's `USER_INPUT`, so it never re-reads an older answer. A turn usually has several PLANNER_RESPONSE steps; the last is the final answer. `ANTIGRAVITY_RESPONSE_TEXT` overrides the transcript.
-3. `is_audio_command` skips turns whose request was `/readout stop|replay|test`. Those make or stop audio themselves, and reading the confirmation would cut them off. This matters for agy only; in Claude Code they never reach the model.
+3. `is_audio_command` skips turns whose request was `/readout stop|replay|last|test`. Those make or stop audio themselves, and reading the confirmation would cut them off. This matters for agy only; in Claude Code they never reach the model.
 4. `prepare_speech_content` picks the text by mode. Both modes start from `markdown_speech.parse_markdown`, which produces blocks: heading, paragraph, list (items carry their nested code), code, table and quote/alert.
    - `explain` → `explainer.explain_response`. If the full rendering is ≤ 320 chars, it's read in full. Otherwise the explainer walks the heading sections: lead sentences, list item titles, table rows and alerts, with **all** shell commands in place. Prose stops at `explain_max_chars` (default 1000); after that, sections contribute only their commands, and skipped titles are named. Commands are capped at 15. With `use_llm` and a Gemini key, it tries Gemini 2.5 Flash first.
    - `direct` → `render_full`, which reads every block, replaces code with a notice, and truncates at `max_chars`.
-5. `speak_text` spawns `player.py` **detached** (`start_new_session=True`), so the hook returns immediately.
+5. Every response is also saved to `last_response.md`, even while readout is off, as the fallback for `readout last`.
+6. `speak_text` spawns `player.py` **detached** (`start_new_session=True`), so the hook returns immediately.
 
 **`scripts/player.py`** (detached process)
 - Stops previous playback by killing the old player's whole **process group** (`killpg`); the sound comes from its ffplay/mpv child. It first checks that the PID really is a `player.py`.
@@ -78,7 +79,7 @@ Every hook script swallows exceptions and must exit 0 with the output its agent 
 
 ### Logic to keep in sync
 
-- **Action handling:** `toggle.py` `main()` (prints) and `pre_hook.py` `execute_toggle_action()` (returns strings). Action names live in `toggle.py` (`OFF_ACTIONS`, `STOP_ACTIONS`, `REPLAY_ACTIONS`, `AUDIO_ACTIONS`). stop/replay/test are shared helpers in `toggle.py` (`stop_speech`, `replay_last`, `speak_test`); reuse them. `stop` means "stop current speech"; `off`/`disable`/`mute` disable readout and also stop speech. Mode aliases also appear in `readout.prepare_speech_content`.
+- **Action handling:** `toggle.py` `main()` (prints) and `pre_hook.py` `execute_toggle_action()` (returns strings). Action names live in `toggle.py` (`OFF_ACTIONS`, `STOP_ACTIONS`, `REPLAY_ACTIONS`, `LAST_ACTIONS`, `AUDIO_ACTIONS`). stop/replay/last/test are shared helpers in `toggle.py` (`stop_speech`, `replay_last`, `read_last`, `speak_test`); reuse them. `replay` repeats `last.txt` (what was spoken); `last` re-renders the previous response via `readout.previous_response`: the Claude Code transcript (`transcript_path`), the agy transcript (skipping the current `USER_INPUT`), else `last_response.md`. It must never change `enabled`. `stop` means "stop current speech"; `off`/`disable`/`mute` disable readout and also stop speech. Mode aliases also appear in `readout.prepare_speech_content`.
 - **Voice aliases:** defined once in `player.VOICE_ALIASES`. The lists in `toggle.print_available_voices`, `commands/readout.md`, `skills/readout/SKILL.md` and `README.md` are written by hand.
 - **Version:** `plugin.json` (agy) and `.claude-plugin/plugin.json`, plus `CHANGELOG.md`.
 
